@@ -232,6 +232,9 @@ int main(void)
 		PIT_TCTRL0 = PIT_TCTRL_TIE | PIT_TCTRL_TEN;
 	}
 
+	// Cache mouse/keyboard EP numbers for fast injection dispatch
+	kmbox_cache_endpoints(&desc);
+
 	// Initialize USB1 device stack
 	if (!usb_device_init(&desc)) {
 		led_blink_forever(9, 80, 120);
@@ -321,7 +324,7 @@ int main(void)
 		}
 
 		// Send injected-only reports if no real report was merged this cycle
-		kmbox_send_pending(&desc);
+		kmbox_send_pending();
 
 #if TFT_ENABLED
 		// TFT display update at ~30 Hz (33ms intervals)

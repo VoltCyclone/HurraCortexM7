@@ -28,18 +28,22 @@ static usb_dev_dtd_t dtd_ep0_rx  __attribute__((section(".dmabuffers"), aligned(
 static usb_dev_dtd_t dtd_int_tx[MAX_INT_EPS]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 
-// Data buffers
+// Data buffers — double-banked: USB DMA reads bank[active], CPU writes bank[!active]
 static uint8_t ep0_tx_buf[512] __attribute__((section(".dmabuffers"), aligned(32)));
-static uint8_t int_tx_buf[MAX_INT_EPS][64]
+static uint8_t int_tx_buf[MAX_INT_EPS][2][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 
 // ---- State ----
 
 static const captured_descriptors_t *cap_desc;
 static usb_dev_state_t dev_state;
-static bool int_ep_busy[USB_DEV_NUM_ENDPOINTS];  // indexed by EP number (1-7)
 static uint8_t ep_to_slot[USB_DEV_NUM_ENDPOINTS]; // EP num -> dtd/buf slot
 static uint8_t num_int_eps;
+
+// Bitmask state — bit N corresponds to EP N (bits 1-7 used, bit 0 unused)
+static uint8_t ep_busy_mask;     // bit set = EP has active DMA transfer in flight
+static uint8_t active_bank_mask; // bit set = EP using bank 1, clear = bank 0
+static uint8_t pending_len[USB_DEV_NUM_ENDPOINTS];  // 0 = no pending report staged
 
 // ---- Endpoint control register access ----
 
@@ -47,6 +51,28 @@ static volatile uint32_t *endptctrl_reg(uint8_t ep)
 {
 	// ENDPTCTRL0-7 at offset 0x1C0 + ep*4
 	return (volatile uint32_t *)(0x402E0000 + 0x1C0 + ep * 4);
+}
+
+// Prime an interrupt IN endpoint from a specific bank buffer.
+// Caller must ensure EP is not busy.
+static void prime_int_ep(uint8_t ep_num, uint8_t slot, uint8_t bank, uint16_t len)
+{
+	uint8_t qh_idx = ep_num * 2 + 1;
+
+	dtd_int_tx[slot].next = DTD_TERMINATE;
+	dtd_int_tx[slot].token = DTD_ACTIVE | DTD_IOC | DTD_TOTAL_BYTES(len);
+	dtd_int_tx[slot].buffer[0] = (uint32_t)int_tx_buf[slot][bank];
+
+	dqh_list[qh_idx].next = (uint32_t)&dtd_int_tx[slot];
+	dqh_list[qh_idx].token = 0;
+	asm volatile("dsb" ::: "memory");
+
+	USB1_ENDPTPRIME = (1 << (16 + ep_num));
+	if (bank)
+		active_bank_mask |= (1 << ep_num);
+	else
+		active_bank_mask &= ~(1 << ep_num);
+	ep_busy_mask |= (1 << ep_num);
 }
 
 // ---- EP0 primitives ----
@@ -214,7 +240,9 @@ static void configure_all_interrupt_endpoints(void)
 {
 	num_int_eps = 0;
 	memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
-	memset(int_ep_busy, 0, sizeof(int_ep_busy));
+	ep_busy_mask = 0;
+	active_bank_mask = 0;
+	memset(pending_len, 0, sizeof(pending_len));
 
 	for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
 		const captured_iface_t *iface = &cap_desc->ifaces[i];
@@ -245,8 +273,6 @@ static void configure_all_interrupt_endpoints(void)
 
 		volatile uint32_t *epctrl = endptctrl_reg(ep_num);
 		*epctrl = USB_ENDPTCTRL_TXE | USB_ENDPTCTRL_TXT(3) | USB_ENDPTCTRL_TXR;
-
-		int_ep_busy[ep_num] = false;
 	}
 }
 
@@ -267,7 +293,7 @@ static void handle_set_configuration(const usb_setup_t *setup)
 		}
 		num_int_eps = 0;
 		memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
-		memset(int_ep_busy, 0, sizeof(int_ep_busy));
+		ep_busy_mask = 0;
 	} else {
 		configure_all_interrupt_endpoints();
 		dev_state = USB_DEV_STATE_CONFIGURED;
@@ -420,7 +446,9 @@ static void handle_bus_reset(void)
 	dqh_list[1].token = 0;
 	asm volatile("dsb" ::: "memory");
 
-	memset(int_ep_busy, 0, sizeof(int_ep_busy));
+	ep_busy_mask = 0;
+	active_bank_mask = 0;
+	memset(pending_len, 0, sizeof(pending_len));
 	num_int_eps = 0;
 	memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
 }
@@ -431,8 +459,10 @@ bool usb_device_init(const captured_descriptors_t *desc)
 {
 	cap_desc = desc;
 	dev_state = USB_DEV_STATE_DEFAULT;
-	memset(int_ep_busy, 0, sizeof(int_ep_busy));
+	ep_busy_mask = 0;
+	active_bank_mask = 0;
 	memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
+	memset(pending_len, 0, sizeof(pending_len));
 	num_int_eps = 0;
 
 	// Match PJRC core USB bring-up power rail settings.
@@ -519,11 +549,21 @@ void usb_device_poll(void)
 		if (complete) {
 			USB1_ENDPTCOMPLETE = complete;
 
-			// Check each EP for interrupt IN completion
-			for (uint8_t ep = 1; ep < USB_DEV_NUM_ENDPOINTS; ep++) {
-				if (int_ep_busy[ep] &&
-				    (complete & (1 << (16 + ep)))) {
-					int_ep_busy[ep] = false;
+			// Mask completed TX EPs against busy set — only process real completions
+			uint8_t done = (uint8_t)(complete >> 16) & ep_busy_mask;
+			ep_busy_mask &= ~done; // clear all done EPs in one shot
+
+			// Iterate only the completed EPs via CTZ (no scanning idle EPs)
+			while (done) {
+				uint8_t ep = (uint8_t)__builtin_ctz(done);
+				done &= done - 1; // clear lowest set bit
+
+				// If a report was staged in the other bank, send it now
+				if (pending_len[ep] > 0) {
+					uint8_t slot = ep_to_slot[ep];
+					uint8_t bank = ((active_bank_mask >> ep) ^ 1) & 1;
+					prime_int_ep(ep, slot, bank, pending_len[ep]);
+					pending_len[ep] = 0;
 				}
 			}
 		}
@@ -534,27 +574,24 @@ bool usb_device_send_report(uint8_t ep_num, const uint8_t *data, uint16_t len)
 {
 	if (dev_state != USB_DEV_STATE_CONFIGURED) return false;
 	if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) return false;
-	if (int_ep_busy[ep_num]) return false;
 
 	uint8_t slot = ep_to_slot[ep_num];
 	if (slot >= MAX_INT_EPS) return false;
-
-	uint8_t qh_idx = ep_num * 2 + 1;
-
 	if (len > 64) len = 64;
-	memcpy(int_tx_buf[slot], data, len);
 
-	dtd_int_tx[slot].next = DTD_TERMINATE;
-	dtd_int_tx[slot].token = DTD_ACTIVE | DTD_IOC | DTD_TOTAL_BYTES(len);
-	dtd_int_tx[slot].buffer[0] = (uint32_t)int_tx_buf[slot];
+	uint8_t ep_bit = (1 << ep_num);
+	if (ep_busy_mask & ep_bit) {
+		// EP is in-flight — stage report in the other bank (overwrites stale pending)
+		uint8_t bank = ((active_bank_mask >> ep_num) ^ 1) & 1;
+		memcpy(int_tx_buf[slot][bank], data, len);
+		pending_len[ep_num] = (uint8_t)len;
+		return true; // staged, not dropped
+	}
 
-	dqh_list[qh_idx].next = (uint32_t)&dtd_int_tx[slot];
-	dqh_list[qh_idx].token = 0;
-	asm volatile("dsb" ::: "memory");
-
-	USB1_ENDPTPRIME = (1 << (16 + ep_num));
-	int_ep_busy[ep_num] = true;
-
+	// EP is free — send immediately from current bank
+	uint8_t bank = (active_bank_mask >> ep_num) & 1;
+	memcpy(int_tx_buf[slot][bank], data, len);
+	prime_int_ep(ep_num, slot, bank, len);
 	return true;
 }
 

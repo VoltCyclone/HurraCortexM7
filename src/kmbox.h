@@ -37,9 +37,13 @@ void kmbox_poll(void);
 // iface_protocol: 1=keyboard, 2=mouse (from captured descriptor)
 void kmbox_merge_report(uint8_t iface_protocol, uint8_t *report, uint8_t len);
 
+// Cache mouse/keyboard EP numbers from descriptors.
+// Call once after enumeration — eliminates per-poll iface scanning.
+void kmbox_cache_endpoints(const captured_descriptors_t *desc);
+
 // If injection state is dirty and no real report came this cycle,
 // synthesize and send injected-only reports.
-void kmbox_send_pending(const captured_descriptors_t *desc);
+void kmbox_send_pending(void);
 
 // Apply smooth injection output to inject state.
 // Called from PIT ISR-gated loop in main, not from kmbox_poll.

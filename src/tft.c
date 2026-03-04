@@ -13,7 +13,8 @@ static uint8_t fb[2][TFT_FB_SIZE]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 
 // Per-row transfer buffers (ping-pong for DMA overlap)
-static uint16_t txbuf[2][TFT_WIDTH]
+// Each entry packs 2 RGB565 pixels for 32-bit SPI frames
+static uint32_t txbuf[2][TFT_WIDTH / 2]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 
 uint8_t *tft_input;
@@ -118,17 +119,17 @@ void tft_init(void)
 	tft_input = fb[0];
 	tft_committed = fb[1];
 	memset(fb[0], 0, TFT_FB_SIZE);
-	memset(fb[1], 0, TFT_FB_SIZE);
+	memset(fb[1], 0xFF, TFT_FB_SIZE); // differ from fb[0] to force first full sync
 
 	// ---- Clock gating ----
 	CCM_CCGR1 |= CCM_CCGR1_LPSPI4(CCM_CCGR_ON);
 	CCM_CCGR5 |= CCM_CCGR5_DMA(CCM_CCGR_ON); // already on, harmless
 
-	// LPSPI clock source: PLL2 (528 MHz), divider = 7+1 = 8 → 66 MHz
+	// LPSPI clock source: PLL2 (528 MHz), divider = 3+1 = 4 → 132 MHz
 	CCM_CBCMR = (CCM_CBCMR & ~(CCM_CBCMR_LPSPI_CLK_SEL_MASK |
 	             CCM_CBCMR_LPSPI_PODF_MASK))
 	          | CCM_CBCMR_LPSPI_CLK_SEL(2)
-	          | CCM_CBCMR_LPSPI_PODF(7);
+	          | CCM_CBCMR_LPSPI_PODF(3);
 
 	// ---- Pin mux ----
 	// Pin 13 (GPIO_B0_03) = LPSPI4_SCK (ALT3)
@@ -170,7 +171,7 @@ void tft_init(void)
 	LPSPI4_CR = 0;
 	// Master mode, no stall on TX underrun
 	LPSPI4_CFGR1 = LPSPI_CFGR1_MASTER | LPSPI_CFGR1_NOSTALL;
-	// SCK = lpspi_clk / (SCKDIV+2) = 66 MHz / (0+2) = 33 MHz
+	// SCK = lpspi_clk / (SCKDIV+2) = 132 MHz / (0+2) = 66 MHz
 	LPSPI4_CCR = LPSPI_CCR_SCKDIV(0) | LPSPI_CCR_SCKPCS(1) | LPSPI_CCR_PCSSCK(1);
 	// TX FIFO watermark: request DMA when ≥1 entry free
 	LPSPI4_FCR = LPSPI_FCR_TXWATER(0);
@@ -179,18 +180,18 @@ void tft_init(void)
 	// Enable module
 	LPSPI4_CR = LPSPI_CR_MEN;
 
-	// ---- eDMA channel 1: txbuf[] → LPSPI4_TDR ----
+	// ---- eDMA channel 1: txbuf[] → LPSPI4_TDR (32-bit packed pixel pairs) ----
 	DMAMUX_CHCFG1 = 0; // disable before config
 	DMA_TCD1_SADDR = txbuf[0];
-	DMA_TCD1_SOFF = 2; // 16-bit increments
-	DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(DMA_TCD_ATTR_SIZE_16BIT) |
-	                DMA_TCD_ATTR_DSIZE(DMA_TCD_ATTR_SIZE_16BIT);
-	DMA_TCD1_NBYTES_MLNO = 2; // 1 halfword per minor loop
+	DMA_TCD1_SOFF = 4; // 32-bit increments
+	DMA_TCD1_ATTR = DMA_TCD_ATTR_SSIZE(DMA_TCD_ATTR_SIZE_32BIT) |
+	                DMA_TCD_ATTR_DSIZE(DMA_TCD_ATTR_SIZE_32BIT);
+	DMA_TCD1_NBYTES_MLNO = 4; // 1 word (2 pixels) per minor loop
 	DMA_TCD1_SLAST = 0; // don't adjust source after major
 	DMA_TCD1_DADDR = (volatile void *)&LPSPI4_TDR;
 	DMA_TCD1_DOFF = 0; // fixed destination
-	DMA_TCD1_CITER_ELINKNO = TFT_WIDTH;
-	DMA_TCD1_BITER_ELINKNO = TFT_WIDTH;
+	DMA_TCD1_CITER_ELINKNO = TFT_WIDTH / 2;
+	DMA_TCD1_BITER_ELINKNO = TFT_WIDTH / 2;
 	DMA_TCD1_DLASTSGA = 0;
 	DMA_TCD1_CSR = DMA_TCD_CSR_DREQ; // auto-disable request on major complete
 	DMAMUX_CHCFG1 = DMAMUX_SOURCE_LPSPI4_TX | DMAMUX_CHCFG_ENBL;
@@ -216,53 +217,99 @@ void tft_swap_buffers(void)
 	tft_input = tmp;
 }
 
-// ---- Display sync: row-by-row palette lookup + DMA ----
+// ---- Display sync: dirty-row partial update + DMA ----
+// Compares committed (new) vs input (old) framebuffer to find changed rows.
+// Only sends dirty row spans via RASET+RAMWR, skipping identical rows.
+// Saves ~75% SPI bandwidth on a stats dashboard where most rows are static.
 
 void tft_sync(void)
 {
-	// Send RAMWR command to start pixel data
-	tft_begin_sync();
-	gpio_dc_high(); // data mode for pixels
-	gpio_cs_low();
-
-	// Configure LPSPI4 for 16-bit continuous transfer, RX masked
-	LPSPI4_TCR = LPSPI_TCR_FRAMESZ(15) | LPSPI_TCR_RXMSK | LPSPI_TCR_CONT;
-
-	const uint8_t *inptr = tft_committed;
+	// Compare old vs new framebuffers — build 160-bit dirty row bitmask
+	// Each row is 128 bytes = 32 words; early-exit on first difference per row
+	const uint32_t *np = (const uint32_t *)tft_committed;
+	const uint32_t *op = (const uint32_t *)tft_input;
+	uint32_t dirty[5] = {0, 0, 0, 0, 0};
 
 	for (int y = 0; y < TFT_HEIGHT; y++) {
-		uint16_t *buf = txbuf[y & 1];
-
-		// CPU palette lookup for this row (128 lookups ≈ 0.5 µs at 600 MHz)
-		for (int x = 0; x < TFT_WIDTH; x++)
-			buf[x] = tft_palette[*inptr++];
-
-		// Wait for previous row DMA to complete
-		while (!(DMA_TCD1_CSR & DMA_TCD_CSR_DONE)) {
-			if (y == 0) break; // first row: no previous transfer
+		for (int w = 0; w < 32; w++) {
+			if (np[w] != op[w]) {
+				dirty[y >> 5] |= (1u << (y & 31));
+				break;
+			}
 		}
-
-		// Clear DONE flag and kick new transfer
-		DMA_CDNE = 1; // clear done for channel 1
-		__asm volatile("dsb" ::: "memory");
-		DMA_TCD1_SADDR = buf;
-		DMA_TCD1_CITER_ELINKNO = TFT_WIDTH;
-		DMA_TCD1_BITER_ELINKNO = TFT_WIDTH;
-		__asm volatile("dsb" ::: "memory");
-		DMA_SERQ = 1; // enable channel 1 requests
+		np += 32;
+		op += 32;
 	}
 
-	// Wait for final row
-	while (!(DMA_TCD1_CSR & DMA_TCD_CSR_DONE))
-		;
+	// Scan dirty bitmask for contiguous spans
+	int y = 0;
+	while (y < TFT_HEIGHT) {
+		// Skip clean rows
+		while (y < TFT_HEIGHT && !(dirty[y >> 5] & (1u << (y & 31))))
+			y++;
+		if (y >= TFT_HEIGHT) break;
 
-	// End continuous mode: write TCR with CONT cleared to generate final PCS rise
-	LPSPI4_TCR = LPSPI_TCR_FRAMESZ(15) | LPSPI_TCR_RXMSK;
+		int ys = y;
+		// Extend to end of contiguous dirty rows
+		while (y < TFT_HEIGHT && (dirty[y >> 5] & (1u << (y & 31))))
+			y++;
+		int ye = y - 1;
 
-	// Wait for SPI to fully drain
-	spi_wait_idle();
+		// Set row window for this dirty span
+		uint8_t raset[] = { 0, (uint8_t)ys, 0, (uint8_t)ye };
+		tft_command(0x2b, raset, 4);
 
-	gpio_cs_high();
+		// RAMWR — send command byte, keep CS low for pixel data
+		gpio_dc_low();
+		gpio_cs_low();
+		spi_write8_blocking(0x2c);
+		spi_wait_idle();
+		gpio_dc_high();
+
+		LPSPI4_TCR = LPSPI_TCR_FRAMESZ(31) | LPSPI_TCR_RXMSK | LPSPI_TCR_CONT;
+
+		const uint8_t *inptr = tft_committed + ys * TFT_WIDTH;
+		int span_rows = ye - ys + 1;
+
+		for (int r = 0; r < span_rows; r++) {
+			uint32_t *buf = txbuf[r & 1];
+
+			// 4-wide palette lookup: pack 2 RGB565 pixels per 32-bit word
+			for (int x = 0; x < TFT_WIDTH / 2; x += 2) {
+				uint32_t idx4 = *(const uint32_t *)inptr;
+				uint16_t p0 = tft_palette[idx4 & 0xFF];
+				uint16_t p1 = tft_palette[(idx4 >> 8) & 0xFF];
+				uint16_t p2 = tft_palette[(idx4 >> 16) & 0xFF];
+				uint16_t p3 = tft_palette[idx4 >> 24];
+				buf[x]     = ((uint32_t)p0 << 16) | p1;
+				buf[x + 1] = ((uint32_t)p2 << 16) | p3;
+				inptr += 4;
+			}
+
+			// Wait for previous row DMA (skip on first row of span)
+			if (r > 0) {
+				while (!(DMA_TCD1_CSR & DMA_TCD_CSR_DONE))
+					;
+			}
+
+			DMA_CDNE = 1;
+			__asm volatile("dsb" ::: "memory");
+			DMA_TCD1_SADDR = buf;
+			DMA_TCD1_CITER_ELINKNO = TFT_WIDTH / 2;
+			DMA_TCD1_BITER_ELINKNO = TFT_WIDTH / 2;
+			__asm volatile("dsb" ::: "memory");
+			DMA_SERQ = 1;
+		}
+
+		// Wait for final row of this span
+		while (!(DMA_TCD1_CSR & DMA_TCD_CSR_DONE))
+			;
+
+		// End continuous SPI mode and release CS
+		LPSPI4_TCR = LPSPI_TCR_FRAMESZ(31) | LPSPI_TCR_RXMSK;
+		spi_wait_idle();
+		gpio_cs_high();
+	}
 }
 
 void tft_swap_sync(void)
