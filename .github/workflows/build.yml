@@ -45,8 +45,8 @@ jobs:
 
       - name: Clone Pico SDK
         run: |
-          git clone --branch 2.1.0 --depth 1 https://github.com/raspberrypi/pico-sdk $HOME/pico-sdk
-          cd $HOME/pico-sdk && git submodule update --init
+          git clone --branch 2.2.0 --depth 1 https://github.com/raspberrypi/pico-sdk $HOME/pico-sdk
+          cd $HOME/pico-sdk && git submodule update --init --recursive --depth 1
 
       - name: Build bridge firmware
         run: |
