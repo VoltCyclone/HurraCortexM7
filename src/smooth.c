@@ -31,39 +31,27 @@ static inline int32_t fp_div(int32_t a, int32_t b)
 	return (int32_t)((float)a / (float)b * (float)SMOOTH_FP_ONE);
 }
 
-// ---- Asymmetric easing with overshoot (inline, no LUT) ----
-// Models real human movement: fast attack (quartic), slight overshoot
-// at ~75% progress, then slow corrective settle.
-// t in [0, FP_ONE] -> eased value in [0, FP_ONE]
-// Peak overshoot ~2.5% past target, settles back by t=1.0.
+// ---- Asymmetric easing (inline, no LUT) ----
+// Models natural movement: quadratic attack → cubic deceleration.
+// Monotonic [0, FP_ONE], no overshoot, no clamping artifacts.
+// Delivers ~60% in first 30% of time (fast attack), then long settle tail.
 static inline int32_t ease_asymmetric(int32_t t)
 {
-	// Normalized float for polynomial eval — FPU is free on M7
 	float tf = (float)t * (1.0f / (float)SMOOTH_FP_ONE);
 
 	float result;
-	if (tf < 0.45f) {
-		// Fast attack: quartic ramp (steeper than cubic)
-		float n = tf * (1.0f / 0.45f); // normalize to [0,1]
-		float n2 = n * n;
-		result = n2 * n2 * 0.78f; // reaches 0.78 at t=0.45
-	} else if (tf < 0.75f) {
-		// Overshoot phase: quadratic push past 1.0
-		float n = (tf - 0.45f) * (1.0f / 0.30f); // [0,1]
-		// Ramp from 0.78 to 1.025 (overshoot)
-		result = 0.78f + n * (0.245f + n * (-0.06f));
+	if (tf < 0.30f) {
+		// Quadratic attack: fast ramp to 60% completion
+		float n = tf * (1.0f / 0.30f);  // [0,1]
+		result = n * n * 0.60f;
 	} else {
-		// Corrective settle: ease back from ~1.025 to 1.0
-		float n = (tf - 0.75f) * (1.0f / 0.25f); // [0,1]
-		float settle = 1.025f - 0.025f * n * n * (3.0f - 2.0f * n);
-		result = settle;
+		// Cubic ease-out: gradual deceleration from 60% to 100%
+		float n = (tf - 0.30f) * (1.0f / 0.70f);  // [0,1]
+		float omt = 1.0f - n;
+		result = 0.60f + 0.40f * (1.0f - omt * omt * omt);
 	}
 
-	// Clamp to valid FP range (overshoot goes slightly above FP_ONE)
-	int32_t fp = (int32_t)(result * (float)SMOOTH_FP_ONE);
-	if (fp > SMOOTH_FP_ONE) fp = SMOOTH_FP_ONE;
-	if (fp < 0) fp = 0;
-	return fp;
+	return (int32_t)(result * (float)SMOOTH_FP_ONE);
 }
 
 // ---- Queue entry ----
@@ -265,9 +253,10 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 		state.speed_noise = 0.97f * state.speed_noise + 0.03f * smooth_lfsr_uniform();
 		state.perp_noise  = 0.97f * state.perp_noise  + 0.03f * smooth_lfsr_uniform();
 
-		// Speed perturbation: multiplicative, targets observed speed_cv ~0.40
-		// EWMA std ~0.071 * K_SPEED -> frame-level speed variation
-		float speed_mod = 1.0f + state.speed_noise * 4.0f;
+		// Speed perturbation: multiplicative, targets observed speed_cv ~0.30-0.40
+		// EWMA std ~0.071 * K_SPEED=1.2 -> ~8.5% frame-level speed variation.
+		// Easing curve's own accel/decel adds ~0.15-0.20 more to observed CV.
+		float speed_mod = 1.0f + state.speed_noise * 1.2f;
 		frame_x_fp = (int32_t)((float)frame_x_fp * speed_mod);
 		frame_y_fp = (int32_t)((float)frame_y_fp * speed_mod);
 
