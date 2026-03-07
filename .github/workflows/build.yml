@@ -1,0 +1,62 @@
+name: Build Firmware
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-teensy-firmware:
+    name: Build Teensy 4.1 Firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Build firmware
+        run: make firmware.hex TOOLCHAIN=/usr/bin
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-hex
+          path: firmware.hex
+
+  build-bridge-firmware:
+    name: Build UART Bridge Firmware (RP2350)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake gcc g++ gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Clone Pico SDK
+        run: |
+          git clone --branch 2.2.0 --depth 1 https://github.com/raspberrypi/pico-sdk $HOME/pico-sdk
+          cd $HOME/pico-sdk && git submodule update --init --recursive --depth 1
+
+      - name: Build bridge firmware
+        run: |
+          mkdir -p uart_bridge/build
+          cd uart_bridge/build
+          cmake .. -DPICO_SDK_PATH=$HOME/pico-sdk
+          make -j$(nproc)
+
+      - name: Upload bridge firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: uart-bridge-uf2
+          path: uart_bridge/build/uart_bridge.uf2
