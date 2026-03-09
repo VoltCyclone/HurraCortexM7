@@ -187,7 +187,7 @@ static void handle_ipv4(const uint8_t *frame, int len)
 
 	// Drop fragments (MF flag or fragment offset != 0)
 	uint16_t frag = rd16(ip + 6);
-	if ((frag & 0x3FFF) != 0 && (frag & 0x2000) != 0) return;
+	if ((frag & 0x1FFF) != 0 || (frag & 0x2000) != 0) return;
 
 	// Check destination: our IP or broadcast
 	uint32_t dst_ip = rd32(ip + 16);
