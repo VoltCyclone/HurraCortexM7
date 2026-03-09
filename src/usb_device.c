@@ -432,6 +432,8 @@ static void handle_passthrough(const usb_setup_t *setup)
 			memcpy(&deferred_out.setup, setup, sizeof(*setup));
 			memcpy(deferred_out.data, ep0_rx_buf, rxd);
 			deferred_out.data_len = (uint16_t)rxd;
+			// Ensure forwarded setup uses the actual received length
+			deferred_out.setup.wLength = deferred_out.data_len;
 			deferred_out.pending = true;
 		}
 	} else {
