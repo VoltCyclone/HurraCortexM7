@@ -410,8 +410,15 @@ static void handle_passthrough(const usb_setup_t *setup)
 
 	if (is_in) {
 		// Device-to-host: forward to real device, return response.
-		// Wait for any in-flight fire-and-forget to finish first.
-		while (usb_host_control_async_busy()) ;
+		// Wait for any in-flight fire-and-forget to finish first, but bound wait time.
+		uint32_t start = millis();
+		while (usb_host_control_async_busy()) {
+			if ((millis() - start) > 200) {
+				// Timeout waiting for previous async control transfer to complete
+				ep0_stall();
+				return;
+			}
+		}
 		int ret = usb_host_control_transfer(cap_desc->dev_addr,
 			cap_desc->ep0_maxpkt, setup, ep0_rx_buf, 200);
 		if (ret < 0) {
