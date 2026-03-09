@@ -238,7 +238,7 @@ static int execute_transfer(uint32_t timeout_ms)
 }
 
 int usb_host_control_transfer(uint8_t addr, uint8_t maxpkt,
-	const usb_setup_t *setup, uint8_t *data)
+	const usb_setup_t *setup, uint8_t *data, uint32_t timeout_ms)
 {
 	uint16_t wLength = setup->wLength;
 	bool is_in = (setup->bmRequestType & 0x80) != 0;
@@ -301,7 +301,7 @@ int usb_host_control_transfer(uint8_t addr, uint8_t maxpkt,
 	qh_async.next = (uint32_t)&qtd_setup;
 	qh_async.token = 0; // Clear any previous status
 	asm volatile("dsb" ::: "memory");
-	int result = execute_transfer(2000);
+	int result = execute_transfer(timeout_ms);
 	if (result < 0) return -1;
 	if (is_in && wLength > 0) {
 		uint32_t remaining = (qtd_data.token >> 16) & 0x7FFF;
@@ -311,6 +311,77 @@ int usb_host_control_transfer(uint8_t addr, uint8_t maxpkt,
 	}
 
 	return 0;
+}
+
+// Fire-and-forget control OUT transfer — sets up DMA, kicks hardware, returns immediately.
+// Result is ignored; hardware completes (or STALLs) on its own.
+// Caller must check usb_host_control_async_busy() to avoid clobbering an in-flight transfer.
+void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
+	const usb_setup_t *setup, uint8_t *data)
+{
+	uint16_t wLength = setup->wLength;
+	memcpy(&setup_buf, setup, 8);
+	setup_qh_for_control(addr, maxpkt, device_speed);
+
+	memset(&qtd_setup, 0, sizeof(qtd_setup));
+	qtd_setup.alt_next = QTD_TERMINATE;
+	qtd_setup.token = QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_SETUP |
+		QTD_TOKEN_NBYTES(8) | QTD_TOKEN_CERR(3);
+	{
+		uint32_t a = (uint32_t)&setup_buf;
+		qtd_setup.buffer[0] = a;
+		a &= 0xFFFFF000;
+		qtd_setup.buffer[1] = a + 0x1000;
+	}
+
+	if (wLength > 0 && data) {
+		memset(&qtd_data, 0, sizeof(qtd_data));
+		qtd_data.alt_next = QTD_TERMINATE;
+		qtd_data.token = QTD_TOKEN_ACTIVE | QTD_TOKEN_TOGGLE |
+			QTD_TOKEN_NBYTES(wLength) | QTD_TOKEN_CERR(3) |
+			QTD_TOKEN_PID_OUT;
+		memcpy(xfer_buf, data, wLength);
+		{
+			uint32_t a = (uint32_t)xfer_buf;
+			qtd_data.buffer[0] = a;
+			a &= 0xFFFFF000;
+			qtd_data.buffer[1] = a + 0x1000;
+		}
+
+		memset(&qtd_status, 0, sizeof(qtd_status));
+		qtd_status.next = QTD_TERMINATE;
+		qtd_status.alt_next = QTD_TERMINATE;
+		qtd_status.token = QTD_TOKEN_ACTIVE | QTD_TOKEN_TOGGLE |
+			QTD_TOKEN_NBYTES(0) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC |
+			QTD_TOKEN_PID_IN;
+
+		qtd_setup.next = (uint32_t)&qtd_data;
+		qtd_data.next = (uint32_t)&qtd_status;
+	} else {
+		memset(&qtd_status, 0, sizeof(qtd_status));
+		qtd_status.next = QTD_TERMINATE;
+		qtd_status.alt_next = QTD_TERMINATE;
+		qtd_status.token = QTD_TOKEN_ACTIVE | QTD_TOKEN_TOGGLE |
+			QTD_TOKEN_NBYTES(0) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC |
+			QTD_TOKEN_PID_IN;
+		qtd_setup.next = (uint32_t)&qtd_status;
+	}
+
+	asm volatile("dsb" ::: "memory");
+	qh_async.next = (uint32_t)&qtd_setup;
+	qh_async.token = 0;
+	asm volatile("dsb" ::: "memory");
+
+	// Kick the async schedule — hardware takes it from here
+	USB2_ASYNCLISTADDR = (uint32_t)&qh_async;
+	USB2_USBSTS = USB2_USBSTS;
+	if (!(USB2_USBCMD & USB_USBCMD_ASE))
+		USB2_USBCMD |= USB_USBCMD_ASE;
+}
+
+bool usb_host_control_async_busy(void)
+{
+	return (qtd_status.token & QTD_TOKEN_ACTIVE) != 0;
 }
 
 static void link_periodic_schedule(void)

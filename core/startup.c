@@ -214,9 +214,14 @@ FLASHMEM static void configure_cache(void)
 
 	// DMA buffer overlay: non-cacheable (higher region # wins over region 5)
 	// Eliminates all manual cache maintenance for USB + TFT DMA structures
-	// 64K covers USB buffers (~4KB) + ST7735 TFT framebuffers (~41KB)
 	SCB_MPU_RBAR = 0x20200000 | REGION(10);
+#if NET_ENABLED
+	// 128K for USB (~4KB) + TFT (~41KB) + ENET (~15KB) buffers
+	SCB_MPU_RASR = MEM_NOCACHE | READWRITE | NOEXEC | SIZE_128K;
+#else
+	// 64K covers USB buffers (~4KB) + ST7735 TFT framebuffers (~41KB)
 	SCB_MPU_RASR = MEM_NOCACHE | READWRITE | NOEXEC | SIZE_64K;
+#endif
 
 	asm("nop"); asm("nop"); asm("nop"); asm("nop"); asm("nop");
 	SCB_MPU_CTRL = SCB_MPU_CTRL_ENABLE;

@@ -116,6 +116,23 @@ if [[ "$uart_choice" -eq 2 ]]; then
     [[ "$autobaud_choice" -eq 2 ]] && UART_AUTOBAUD=1
 fi
 
+# ── Network ──────────────────────────────────────────────────────────────
+NET=0
+
+net_choice=$(prompt_choice "Command input:" \
+    "UART  (KMBox/Makcu/Ferrum)" \
+    "Ethernet (KMBox Net UDP)")
+
+if [[ "$net_choice" -eq 2 ]]; then
+    NET=1
+    # NET mode requires TFT for IP/port/UUID display
+    if [[ "$TFT" -eq 0 ]]; then
+        printf "\n${YELLOW}  Note: Ethernet mode requires TFT — enabling ST7735${RESET}\n"
+        TFT=1
+        TFT_DRIVER=1
+    fi
+fi
+
 # ── Build Options ───────────────────────────────────────────────────────────
 CLEAN=false
 if prompt_yn "Clean before build?" "n"; then
@@ -158,6 +175,12 @@ else
     printf "  │  UART:       ${DIM}%-25s${RESET} │\n" "Disabled"
 fi
 
+if [[ "$NET" -eq 1 ]]; then
+    printf "  │  Network:    ${GREEN}%-25s${RESET} │\n" "KMBox Net (Ethernet)"
+else
+    printf "  │  Network:    ${DIM}%-25s${RESET} │\n" "Disabled"
+fi
+
 $CLEAN && cl="Yes" || cl="No"
 $FLASH && fl="Yes" || fl="No"
 $BUILD_BRIDGE && br="Yes" || br="No"
@@ -182,6 +205,7 @@ MAKE_ARGS=(
     "UART=${UART}"
     "UART_BAUD=${UART_BAUD}"
     "UART_AUTOBAUD=${UART_AUTOBAUD}"
+    "NET=${NET}"
     "-j${PARALLEL}"
 )
 

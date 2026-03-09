@@ -193,6 +193,19 @@ static void tx_flush(void)
 }
 void kmbox_init(void)
 {
+#if NET_ENABLED
+	// NET mode: skip UART/DMA setup — commands come from Ethernet
+	memset(&inject, 0, sizeof(inject));
+	frames_ok = 0;
+	frames_err = 0;
+	cached_mouse_ep = 0;
+	cached_mouse_maxpkt = 0;
+	cached_kb_ep = 0;
+	memset(&mouse_layout, 0, sizeof(mouse_layout));
+	mouse_layout.wheel_bit = 0xFFFF;
+	cached_mouse_report_len = 0;
+	return;
+#endif
 	// Enable LPUART6 clock gate
 	CCM_CCGR3 |= CCM_CCGR3_LPUART6(CCM_CCGR_ON);
 
@@ -470,6 +483,10 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 
 void kmbox_poll(void)
 {
+#if NET_ENABLED
+	merged_this_cycle = false;
+	return; // NET mode: commands come from kmnet_poll()
+#endif
 	merged_this_cycle = false;
 	tx_flush();
 	uint32_t stat = LPUART6_STAT;
@@ -752,6 +769,20 @@ static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
 		inject.mouse_dirty = true;
 	}
 }
+
+void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
+                        int8_t wheel, bool use_smooth)
+{
+	apply_mouse_result(dx, dy, buttons, wheel, use_smooth);
+}
+
+void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6])
+{
+	inject.kb_modifier = modifier;
+	memcpy(inject.kb_keys, keys, 6);
+	inject.kb_dirty = true;
+}
+
 static void dispatch_kmbox_frame(void)
 {
 	switch (frame_cmd) {

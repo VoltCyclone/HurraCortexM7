@@ -121,6 +121,10 @@ static struct {
 	float   last_noise_vx;
 	float   last_noise_vy;
 
+	// Persistent micro-tremor (fills gaps between commands)
+	float   tremor_x;
+	float   tremor_y;
+
 	// Timing humanization state
 	uint8_t consec_skips;        // consecutive skips so far
 	float   rate_bias;           // per-session interval offset (fraction)
@@ -518,12 +522,38 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 		state.last_noise_vy *= SMOOTH_VELOCITY_DECAY;
 	}
 
+	// Persistent micro-tremor: fills zero-movement gaps between commands
+	// with Brownian-like random walk. Mean-reverting to prevent drift.
+	// Critical for eliminating bimodal interval distribution.
+	if (!has_movement && state.humanize) {
+		state.tremor_x = state.tremor_x * SMOOTH_TREMOR_DECAY
+			+ smooth_rand_uniform() * SMOOTH_TREMOR_STEP;
+		state.tremor_y = state.tremor_y * SMOOTH_TREMOR_DECAY
+			+ smooth_rand_uniform() * SMOOTH_TREMOR_STEP;
+		frame_x_fp = (int32_t)(state.tremor_x * (float)SMOOTH_FP_ONE);
+		frame_y_fp = (int32_t)(state.tremor_y * (float)SMOOTH_FP_ONE);
+	}
+
 	// Add frame contribution to sub-pixel accumulator
 	state.x_accum_fp += frame_x_fp;
 	state.y_accum_fp += frame_y_fp;
 
-	int16_t ix = fp_to_int(state.x_accum_fp);
-	int16_t iy = fp_to_int(state.y_accum_fp);
+	// Dithered rounding: randomize threshold ±DITHER_RANGE around 0.5
+	// to break up repeated identical integer deltas from smooth easing.
+	// Unbiased on average (symmetric around 0.5), no displacement leak
+	// since remainder stays in sub-pixel accumulator.
+	int16_t ix, iy;
+	if (state.humanize) {
+		int32_t dx = (int32_t)(smooth_rand_uniform() * SMOOTH_DITHER_RANGE
+			* (float)SMOOTH_FP_ONE);
+		int32_t dy = (int32_t)(smooth_rand_uniform() * SMOOTH_DITHER_RANGE
+			* (float)SMOOTH_FP_ONE);
+		ix = (int16_t)((state.x_accum_fp + SMOOTH_FP_HALF + dx) >> SMOOTH_FP_SHIFT);
+		iy = (int16_t)((state.y_accum_fp + SMOOTH_FP_HALF + dy) >> SMOOTH_FP_SHIFT);
+	} else {
+		ix = fp_to_int(state.x_accum_fp);
+		iy = fp_to_int(state.y_accum_fp);
+	}
 
 	state.x_accum_fp -= int_to_fp(ix);
 	state.y_accum_fp -= int_to_fp(iy);
@@ -555,6 +585,8 @@ void smooth_clear(void)
 	state.y_accum_fp = 0;
 	state.last_noise_vx = 0.0f;
 	state.last_noise_vy = 0.0f;
+	state.tremor_x = 0.0f;
+	state.tremor_y = 0.0f;
 }
 
 void smooth_set_max_per_frame(int16_t max)

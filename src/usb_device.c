@@ -26,6 +26,7 @@ static usb_dev_dtd_t dtd_int_tx[MAX_INT_EPS]
 
 // Data buffers — double-banked: USB DMA reads bank[active], CPU writes bank[!active]
 static uint8_t ep0_tx_buf[512] __attribute__((section(".dmabuffers"), aligned(32)));
+static uint8_t ep0_rx_buf[512] __attribute__((section(".dmabuffers"), aligned(32)));
 static uint8_t int_tx_buf[MAX_INT_EPS][2][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 static const captured_descriptors_t *cap_desc;
@@ -35,6 +36,16 @@ static uint8_t num_int_eps;
 static uint8_t ep_busy_mask;     // bit set = EP has active DMA transfer in flight
 static uint8_t active_bank_mask; // bit set = EP using bank 1, clear = bank 0
 static uint8_t pending_len[USB_DEV_NUM_ENDPOINTS];  // 0 = no pending report staged
+
+// Deferred passthrough: SET_REPORT data queued for async forwarding to real device.
+// Avoids blocking the setup handler (and stalling interrupt EP polling).
+static struct {
+	usb_setup_t setup;
+	uint8_t     data[64];
+	uint16_t    data_len;
+	bool        pending;
+} deferred_out;
+
 static volatile uint32_t *endptctrl_reg(uint8_t ep)
 {
 	// ENDPTCTRL0-7 at offset 0x1C0 + ep*4
@@ -99,6 +110,8 @@ static void ep0_tx_data(const uint8_t *data, uint16_t len)
 		USB1_ENDPTPRIME |= (1 << 0); // Prime EP0 RX
 	}
 }
+
+static void handle_passthrough(const usb_setup_t *setup);
 
 static void ep0_stall(void)
 {
@@ -334,7 +347,7 @@ static void handle_class_request(const usb_setup_t *setup)
 	case 0x0B: // SET_PROTOCOL
 		ep0_tx_data(NULL, 0);
 		break;
-	case 0x01: // GET_REPORT
+	case 0x01: // GET_REPORT — return zeros (real data flows via interrupt EPs)
 		{
 			uint16_t len = setup->wLength;
 			if (len > sizeof(ep0_tx_buf)) len = sizeof(ep0_tx_buf);
@@ -342,9 +355,9 @@ static void handle_class_request(const usb_setup_t *setup)
 			ep0_tx_data(ep0_tx_buf, len);
 		}
 		break;
-	case 0x09: // SET_REPORT
-		ep0_tx_data(NULL, 0);
-		break;
+	case 0x09: // SET_REPORT — forward to real device (LED control, etc.)
+		handle_passthrough(setup);
+		return;
 	case 0x03: // GET_PROTOCOL
 		{
 			static const uint8_t proto = 1; // Report protocol
@@ -356,6 +369,80 @@ static void handle_class_request(const usb_setup_t *setup)
 		break;
 	}
 }
+// Blocking receive of EP0 OUT data phase (for control transfers with host-to-device data).
+// Returns bytes received, or -1 on error/timeout.
+static int ep0_rx_data(uint16_t max_len)
+{
+	if (max_len > sizeof(ep0_rx_buf)) max_len = sizeof(ep0_rx_buf);
+
+	memset(&dtd_ep0_rx, 0, sizeof(dtd_ep0_rx));
+	dtd_ep0_rx.next  = DTD_TERMINATE;
+	dtd_ep0_rx.token = DTD_ACTIVE | DTD_IOC | DTD_TOTAL_BYTES(max_len);
+	dtd_ep0_rx.buffer[0] = (uint32_t)ep0_rx_buf;
+	dtd_ep0_rx.buffer[1] = ((uint32_t)ep0_rx_buf + 4096) & ~0xFFFu;
+
+	dqh_list[0].next  = (uint32_t)&dtd_ep0_rx;
+	dqh_list[0].token = 0;
+	asm volatile("dsb" ::: "memory");
+
+	USB1_ENDPTPRIME = (1 << 0); // Prime EP0 RX
+
+	uint32_t start = millis();
+	while (1) {
+		uint32_t token = dtd_ep0_rx.token;
+		if (!(token & DTD_ACTIVE)) {
+			if (token & (DTD_HALTED | DTD_BUFFER_ERR | DTD_XACT_ERR))
+				return -1;
+			uint32_t remaining = (token >> 16) & 0x7FFF;
+			return (int)(max_len - remaining);
+		}
+		if ((millis() - start) > 50) return -1;
+	}
+}
+
+// Forward a control request to the real USB device and relay the response.
+// IN requests block briefly (rare — vendor IN only, GET_REPORT handled locally).
+// OUT requests are deferred: ACK the computer immediately, forward next poll cycle.
+static void handle_passthrough(const usb_setup_t *setup)
+{
+	bool is_in = (setup->bmRequestType & 0x80) != 0;
+	uint16_t wLength = setup->wLength;
+
+	if (is_in) {
+		// Device-to-host: forward to real device, return response.
+		// Wait for any in-flight fire-and-forget to finish first.
+		while (usb_host_control_async_busy()) ;
+		int ret = usb_host_control_transfer(cap_desc->dev_addr,
+			cap_desc->ep0_maxpkt, setup, ep0_rx_buf, 200);
+		if (ret < 0) {
+			ep0_stall();
+			return;
+		}
+		ep0_tx_data(ep0_rx_buf, (uint16_t)ret);
+	} else if (wLength > 0) {
+		// Host-to-device with data: receive data, ACK immediately, defer forward
+		int rxd = ep0_rx_data(wLength);
+		if (rxd < 0) {
+			ep0_stall();
+			return;
+		}
+		ep0_tx_data(NULL, 0); // ACK computer now — don't block
+		// Queue for forwarding in next poll cycle
+		if (rxd <= (int)sizeof(deferred_out.data)) {
+			memcpy(&deferred_out.setup, setup, sizeof(*setup));
+			memcpy(deferred_out.data, ep0_rx_buf, rxd);
+			deferred_out.data_len = (uint16_t)rxd;
+			deferred_out.pending = true;
+		}
+	} else {
+		// No data phase: ACK immediately, defer forward
+		ep0_tx_data(NULL, 0);
+		memcpy(&deferred_out.setup, setup, sizeof(*setup));
+		deferred_out.data_len = 0;
+		deferred_out.pending = true;
+	}
+}
+
 static void handle_setup_packet(void)
 {
 	usb_setup_t setup;
@@ -382,7 +469,8 @@ static void handle_setup_packet(void)
 	} else if (req_type == 0x20) {
 		handle_class_request(&setup);
 	} else {
-		ep0_stall();
+		// Vendor and other request types: pass through to real device
+		handle_passthrough(&setup);
 	}
 }
 static void handle_bus_reset(void)
@@ -457,6 +545,7 @@ void usb_device_poll(void)
 	USB1_USBSTS = status; // Write-to-clear
 	if (__builtin_expect(status & USB_USBSTS_URI, 0)) {
 		handle_bus_reset();
+		deferred_out.pending = false; // discard on reset
 	}
 	if (status & USB_USBSTS_UI) {
 		if (USB1_ENDPTSETUPSTAT & 1) {
@@ -478,6 +567,16 @@ void usb_device_poll(void)
 				}
 			}
 		}
+	}
+
+	// Forward deferred passthrough requests to real device (fire-and-forget).
+	// Skip if a previous async transfer is still in flight — try again next poll.
+	if (__builtin_expect(deferred_out.pending, 0) &&
+	    !usb_host_control_async_busy()) {
+		deferred_out.pending = false;
+		usb_host_control_transfer_fire(cap_desc->dev_addr,
+			cap_desc->ep0_maxpkt, &deferred_out.setup,
+			deferred_out.data_len > 0 ? deferred_out.data : NULL);
 	}
 }
 
