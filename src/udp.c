@@ -200,6 +200,7 @@ static void handle_ipv4(const uint8_t *frame, int len)
 	if (csum != 0) return;
 
 	uint8_t proto = ip[9];
+	if (total_len < ihl) return;
 	uint16_t ip_payload_len = total_len - ihl;
 	const uint8_t *payload = ip + ihl;
 
