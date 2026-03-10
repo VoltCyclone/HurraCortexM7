@@ -100,7 +100,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	int ret;
 	usb_setup_t setup;
 	setup = make_get_descriptor(USB_DESC_DEVICE, 0, 0, 8);
-	ret = usb_host_control_transfer(0, 8, &setup, desc->device_desc);
+	ret = usb_host_control_transfer(0, 8, &setup, desc->device_desc, 2000);
 	if (ret < 0 || ret < 8 || desc->device_desc[0] != 18 ||
 	    desc->device_desc[1] != USB_DESC_DEVICE) {
 		uart_puts("FAIL: could not read device descriptor (8 bytes)\r\n");
@@ -113,7 +113,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	setup.wValue = desc->dev_addr;
 	setup.wIndex = 0;
 	setup.wLength = 0;
-	ret = usb_host_control_transfer(0, desc->ep0_maxpkt, &setup, NULL);
+	ret = usb_host_control_transfer(0, desc->ep0_maxpkt, &setup, NULL, 2000);
 	if (ret < 0) {
 		uart_puts("FAIL: SET_ADDRESS\r\n");
 		return false;
@@ -121,7 +121,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	delay(10); // Device needs time to process new address
 	setup = make_get_descriptor(USB_DESC_DEVICE, 0, 0, 18);
 	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-		&setup, desc->device_desc);
+		&setup, desc->device_desc, 2000);
 	if (ret < 0 || ret < 18 || desc->device_desc[0] != 18 ||
 	    desc->device_desc[1] != USB_DESC_DEVICE) {
 		uart_puts("FAIL: full device descriptor\r\n");
@@ -130,7 +130,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	desc->device_desc_len = 18;
 	setup = make_get_descriptor(USB_DESC_CONFIGURATION, 0, 0, 9);
 	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-		&setup, desc->config_desc);
+		&setup, desc->config_desc, 2000);
 	if (ret < 0 || ret < 9 || desc->config_desc[1] != USB_DESC_CONFIGURATION) {
 		uart_puts("FAIL: config descriptor header\r\n");
 		return false;
@@ -145,7 +145,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	}
 	setup = make_get_descriptor(USB_DESC_CONFIGURATION, 0, 0, total_len);
 	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-		&setup, desc->config_desc);
+		&setup, desc->config_desc, 2000);
 	if (ret < 0 || ret < 9 || desc->config_desc[1] != USB_DESC_CONFIGURATION) {
 		uart_puts("FAIL: full config descriptor\r\n");
 		return false;
@@ -164,7 +164,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		setup = make_get_iface_descriptor(USB_DESC_HID_REPORT, 0,
 			iface->iface_num, rdlen);
 		ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-			&setup, iface->hid_report_desc);
+			&setup, iface->hid_report_desc, 2000);
 		if (ret < 0) {
 			uart_puts("    FAIL\r\n");
 			iface->hid_report_desc_len = 0;
@@ -176,7 +176,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	uint8_t str_buf[MAX_STRING_DESC_SIZE];
 	setup = make_get_descriptor(USB_DESC_STRING, 0, 0, 4);
 	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-		&setup, str_buf);
+		&setup, str_buf, 2000);
 	uint16_t langid = 0x0409; // Default to English
 	if (ret >= 4 && str_buf[1] == USB_DESC_STRING) {
 		langid = str_buf[2] | (str_buf[3] << 8);
@@ -195,7 +195,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		setup = make_get_descriptor(USB_DESC_STRING, string_indices[i],
 			langid, MAX_STRING_DESC_SIZE);
 		ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-			&setup, desc->string_desc[desc->num_strings]);
+			&setup, desc->string_desc[desc->num_strings], 2000);
 		if (ret > 0) {
 			desc->string_desc_len[desc->num_strings] = ret;
 			desc->string_index[desc->num_strings] = string_indices[i];

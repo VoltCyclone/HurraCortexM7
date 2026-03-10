@@ -11,8 +11,18 @@ permissions:
 
 jobs:
   build-teensy-firmware:
-    name: Build Teensy 4.1 Firmware
+    name: Build Teensy 4.1 Firmware (${{ matrix.config.name }})
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        config:
+          - name: with-tft
+            make_args: TFT=1
+          - name: without-tft
+            make_args: TFT=0
+          - name: with-net
+            make_args: NET=1
 
     steps:
       - uses: actions/checkout@v4
@@ -22,13 +32,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
 
-      - name: Build firmware
-        run: make firmware.hex TOOLCHAIN=/usr/bin
+      - name: Build firmware (${{ matrix.config.name }})
+        run: make firmware.hex TOOLCHAIN=/usr/bin ${{ matrix.config.make_args }}
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-hex
+          name: firmware-hex-${{ matrix.config.name }}
           path: firmware.hex
 
   build-bridge-firmware:

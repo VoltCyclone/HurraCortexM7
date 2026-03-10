@@ -34,6 +34,17 @@ typedef struct {
 	// UART / KMBox RX
 	uint32_t uart_rx_bytes;    // total bytes received on LPUART6 (DMA ring)
 
+#if NET_ENABLED
+	// Network (KMBox Net over Ethernet)
+	bool     net_connected;    // Client connected via UDP
+	bool     net_link_up;      // Ethernet PHY link status
+	uint32_t net_ip;           // Our IP address (host byte order)
+	uint16_t net_port;         // Listening UDP port
+	uint32_t net_uuid;         // Device UUID (8 hex chars)
+	uint32_t net_rx_count;     // UDP packets received
+	uint32_t net_tx_count;     // UDP packets sent
+#endif
+
 	// System
 	uint32_t uptime_sec;
 	int8_t   cpu_temp_c;        // CPU die temperature in °C

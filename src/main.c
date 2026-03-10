@@ -16,6 +16,11 @@
 #if TFT_ENABLED
 #include "tft_display.h"
 #endif
+#if NET_ENABLED
+#include "kmnet.h"
+#include "udp.h"
+#include "enet.h"
+#endif
 #if TOUCH_ENABLED
 #include "ft6206.h"
 #endif
@@ -231,6 +236,9 @@ int main(void)
 	SCB_SCR |= SCB_SCR_SEVONPEND;
 
 	uart_init();
+#if NET_ENABLED
+	kmnet_init();
+#endif
 	kmbox_init();
 
 	// PIT0: smooth injection timer — clock/ISR now, rate set after enumeration
@@ -248,8 +256,6 @@ int main(void)
 	uart_puts("\r\n\r\nimxrtnsy: USB proxy\r\n");
 	uart_puts("Teensy 4.1 — i.MX RT1062\r\n\r\n");
 	led_on();
-
-	// ---- Phase 1: Host init + descriptor capture ----
 
 	usb_host_init();
 	led_off();
@@ -288,9 +294,6 @@ int main(void)
 	char usb_product[22];
 	desc_product_string(usb_product, sizeof(usb_product));
 
-	// ---- Phase 2: Device stack + proxy ----
-
-	// Set configuration on the real device so it starts generating reports
 	usb_setup_t setup;
 	setup.bmRequestType = 0x00;
 	setup.bRequest = USB_REQ_SET_CONFIG;
@@ -298,16 +301,12 @@ int main(void)
 	setup.wIndex = 0;
 	setup.wLength = 0;
 	int ret = usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
-		&setup, NULL);
+		&setup, NULL, 2000);
 	if (ret < 0) {
 		uart_puts("  SET_CONFIGURATION failed!\r\n");
 	}
 	delay(10);
 
-	// Initialize host-side interrupt polling for all endpoints
-	// Send SET_IDLE(0) and SET_PROTOCOL(1=report) to each HID interface.
-	// Some devices (including Razer) won't send interrupt reports until these
-	// class-specific requests have been issued.
 	for (uint8_t i = 0; i < desc.num_ifaces; i++) {
 		// SET_IDLE: bmRequestType=0x21 (class, interface), bRequest=0x0A
 		setup.bmRequestType = 0x21;
@@ -316,7 +315,7 @@ int main(void)
 		setup.wIndex = i;      // interface number
 		setup.wLength = 0;
 		usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
-			&setup, NULL);
+			&setup, NULL, 2000);
 
 		// SET_PROTOCOL: bmRequestType=0x21, bRequest=0x0B
 		setup.bmRequestType = 0x21;
@@ -325,7 +324,7 @@ int main(void)
 		setup.wIndex = i;
 		setup.wLength = 0;
 		usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
-			&setup, NULL);
+			&setup, NULL, 2000);
 	}
 	ep_mapping_t ep_map[MAX_INTR_EPS];
 	uint8_t num_ep_mappings = 0;
@@ -423,7 +422,11 @@ int main(void)
 
 	while (1) {
 		usb_device_poll();
+#if NET_ENABLED
+		kmnet_poll();
+#else
 		kmbox_poll();
+#endif
 		bool did_work = false;
 		if (pit_tick_pending) {
 			pit_tick_pending = false;
@@ -499,6 +502,15 @@ int main(void)
 				.cpu_temp_c        = tempmon_read(),
 				.usb_vid           = usb_vid,
 				.usb_pid           = usb_pid,
+#if NET_ENABLED
+				.net_connected     = kmnet_client_connected(),
+				.net_link_up       = kmnet_link_up(),
+				.net_ip            = udp_get_ip(),
+				.net_port          = kmnet_get_port(),
+				.net_uuid          = kmnet_get_uuid(),
+				.net_rx_count      = kmnet_rx_count(),
+				.net_tx_count      = kmnet_tx_count(),
+#endif
 			};
 			__builtin_memcpy(st.usb_product, usb_product, sizeof(usb_product));
 			tft_display_update(&st);

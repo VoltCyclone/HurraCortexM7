@@ -174,6 +174,59 @@ static void draw_stats(const tft_proxy_stats_t *s)
 
 	draw_separator(LINE(12));
 
+#if NET_ENABLED
+	// Lines 13-16: Network stats
+	{
+		// IP address: x.x.x.x
+		uint32_t ip = s->net_ip;
+		tft_draw_string(COL(0), LINE(13), COL_GRAY, "IP:");
+		p = buf;
+		p = u32_to_str(p, (ip >> 24) & 0xFF); *p++ = '.';
+		p = u32_to_str(p, (ip >> 16) & 0xFF); *p++ = '.';
+		p = u32_to_str(p, (ip >> 8) & 0xFF);  *p++ = '.';
+		p = u32_to_str(p, ip & 0xFF);
+		fmt_done(buf, p);
+		tft_draw_string(COL(3), LINE(13), COL_WHITE, buf);
+	}
+
+	tft_draw_string(COL(0), LINE(14), COL_GRAY, "Port:");
+	p = buf;
+	p = u32_to_str(p, s->net_port);
+	fmt_done(buf, p);
+	tft_draw_string(COL(5), LINE(14), COL_WHITE, buf);
+
+	tft_draw_string(COL(11), LINE(14), COL_GRAY, "Link:");
+	tft_draw_string(COL(16), LINE(14),
+		s->net_link_up ? COL_GREEN : COL_RED,
+		s->net_link_up ? "UP" : "DN");
+
+	{
+		tft_draw_string(COL(0), LINE(15), COL_GRAY, "UUID:");
+		p = buf;
+		p = u16_to_hex4(p, (uint16_t)(s->net_uuid >> 16));
+		p = u16_to_hex4(p, (uint16_t)(s->net_uuid & 0xFFFF));
+		fmt_done(buf, p);
+		tft_draw_string(COL(5), LINE(15), COL_CYAN, buf);
+
+		tft_draw_string(COL(14), LINE(15),
+			s->net_connected ? COL_GREEN : COL_DARK,
+			s->net_connected ? "CONN" : "WAIT");
+	}
+
+	tft_draw_string(COL(0), LINE(16), COL_GRAY, "RX:");
+	p = buf;
+	p = u32_to_str(p, s->net_rx_count);
+	fmt_done(buf, p);
+	tft_draw_string(COL(3), LINE(16), COL_WHITE, buf);
+
+	tft_draw_string(COL(11), LINE(16), COL_GRAY, "TX:");
+	p = buf;
+	p = u32_to_str(p, s->net_tx_count);
+	fmt_done(buf, p);
+	tft_draw_string(COL(14), LINE(16), COL_WHITE, buf);
+
+	draw_separator(LINE(17));
+#else
 	// Line 13: UART RX activity
 	tft_draw_string(COL(0), LINE(13), COL_GRAY, "UART RX:");
 	if (s->uart_rx_bytes > 0) {
@@ -187,13 +240,21 @@ static void draw_stats(const tft_proxy_stats_t *s)
 	}
 
 	draw_separator(LINE(14));
+#endif
+
+	// Line offsets depend on whether NET stats took extra rows
+#if NET_ENABLED
+#define UPTIME_LINE  18
+#else
+#define UPTIME_LINE  15
+#endif
 
 	{
 		uint32_t sec = s->uptime_sec;
 		uint32_t hr  = sec / 3600;
 		uint32_t min = (sec / 60) % 60;
 		uint32_t s2  = sec % 60;
-		tft_draw_string(COL(0), LINE(15), COL_GRAY, "Up:");
+		tft_draw_string(COL(0), LINE(UPTIME_LINE), COL_GRAY, "Up:");
 		p = buf;
 		p = u32_to_str02(p, hr);
 		*p++ = ':';
@@ -201,18 +262,19 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		*p++ = ':';
 		p = u32_to_str02(p, s2);
 		fmt_done(buf, p);
-		tft_draw_string(COL(3), LINE(15), COL_WHITE, buf);
+		tft_draw_string(COL(3), LINE(UPTIME_LINE), COL_WHITE, buf);
 
-		tft_draw_string(COL(14), LINE(15), COL_GRAY, "CPU:");
+		tft_draw_string(COL(14), LINE(UPTIME_LINE), COL_GRAY, "CPU:");
 		p = buf;
 		p = i8_to_str(p, s->cpu_temp_c);
 		*p++ = 'C';
 		fmt_done(buf, p);
 		uint8_t tcol = (s->cpu_temp_c > 80) ? COL_RED :
 		               (s->cpu_temp_c > 60) ? COL_YELLOW : COL_GREEN;
-		tft_draw_string(COL(18), LINE(15), tcol, buf);
+		tft_draw_string(COL(18), LINE(UPTIME_LINE), tcol, buf);
 	}
 
+#if !NET_ENABLED
 	draw_separator(LINE(16));
 
 	{
@@ -228,6 +290,9 @@ static void draw_stats(const tft_proxy_stats_t *s)
 	if (s->usb_product[0]) {
 		tft_draw_string(COL(0), LINE(18), COL_DARK, s->usb_product);
 	}
+#endif
+
+#undef UPTIME_LINE
 
 #if TFT_DRIVER == TFT_DRIVER_ILI9341
 	// Bottom touch zone indicator (line 39)

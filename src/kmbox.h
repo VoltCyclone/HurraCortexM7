@@ -30,6 +30,11 @@ void kmbox_send_pending(void);
 
 void kmbox_inject_smooth(int16_t dx, int16_t dy);
 
+// Public injection API — called by transport layers (UART or NET)
+void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
+                        int8_t wheel, bool use_smooth);
+void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6]);
+
 uint32_t kmbox_frame_count(void);
 uint32_t kmbox_error_count(void);
 uint32_t kmbox_rx_byte_count(void);

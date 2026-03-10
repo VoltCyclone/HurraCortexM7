@@ -11,9 +11,9 @@
 // ---- Spread duration (microseconds) ----
 // How long to spread a movement over, by distance bucket.
 // Longer = smoother easing, shorter = more responsive.
-#define SMOOTH_SPREAD_SMALL_US       16000   // <20 px
-#define SMOOTH_SPREAD_MEDIUM_US      12000   // 20-60 px
-#define SMOOTH_SPREAD_LARGE_US       8000    // 60-120 px
+#define SMOOTH_SPREAD_SMALL_US       6000    // <20 px  (was 16000 — reduce latency/bimodality)
+#define SMOOTH_SPREAD_MEDIUM_US      9000    // 20-60 px
+#define SMOOTH_SPREAD_LARGE_US       7000    // 60-120 px
 #define SMOOTH_SPREAD_XLARGE_US      5000    // >120 px
 
 // Distance thresholds for spread buckets (pixels)
@@ -22,7 +22,7 @@
 #define SMOOTH_SPREAD_LARGE_PX       120
 
 // Spread duration jitter: ± this fraction of spread_us
-#define SMOOTH_SPREAD_JITTER         0.15f
+#define SMOOTH_SPREAD_JITTER         0.25f
 
 // Min/max frames per injection
 #define SMOOTH_MIN_FRAMES            3
@@ -31,7 +31,7 @@
 // ---- EWMA noise channels ----
 // Alpha for correlated noise (higher = slower drift, longer correlation)
 // 0.97 at 1kHz -> ~33ms correlation time (30Hz bandwidth)
-#define SMOOTH_EWMA_ALPHA            0.97f
+#define SMOOTH_EWMA_ALPHA            0.92f
 #define SMOOTH_EWMA_BETA             (1.0f - SMOOTH_EWMA_ALPHA)
 
 // ---- Speed perturbation ----
@@ -41,16 +41,16 @@
 // With EWMA alpha=0.97, speed_noise std ≈ 0.071.
 // At SCALE=0.55, short hops (gain≈2.0) → ~0.08 per-frame CV → ~0.16 movement CV
 // Long throws (gain≈0.55) → ~0.02 per-frame CV → ~0.04 movement CV
-#define SMOOTH_SPEED_NOISE_SCALE     0.55f
+#define SMOOTH_SPEED_NOISE_SCALE     2.0f
 
 // ---- Perpendicular wobble ----
 // Base wobble amplitude (pixels, before arc_scale)
-#define SMOOTH_PERP_AMPLITUDE        0.20f
+#define SMOOTH_PERP_AMPLITUDE        8.0f
 
 // Low-speed angle smoothing: wobble boost at low speeds
 // arc_scale = 1 + BOOST / (speed_px + 1)
 // At 1px/frame: ~3x, at 3px: ~1.5x, at 8px+: ~1x
-#define SMOOTH_LOWSPEED_BOOST        2.0f
+#define SMOOTH_LOWSPEED_BOOST        4.0f
 
 // ---- Session personality ranges ----
 // Arc bias: dominant perpendicular direction (randomized per session)
@@ -64,7 +64,7 @@
 
 // Easing personality: per-session perturbation of attack fraction [-range, +range]
 // Positive = longer attack (snappier start), negative = shorter attack (more gradual)
-#define SMOOTH_OVERSHOOT_RANGE       0.02f
+#define SMOOTH_OVERSHOOT_RANGE       0.05f
 
 // Fitts' Law coefficients: MT = a + b * log2(dist + 1)
 // Intercept range: [min, min + span]
@@ -84,7 +84,7 @@
 // ---- Noise velocity continuity ----
 // Smoothing alpha for noise components only (base easing is unsmoothed)
 // Higher = more responsive, less smoothing. No displacement leak.
-#define SMOOTH_VELOCITY_ALPHA        0.65f
+#define SMOOTH_VELOCITY_ALPHA        0.40f
 // Noise decay rate when idle (per frame, prevents stale noise momentum)
 #define SMOOTH_VELOCITY_DECAY        0.85f
 
@@ -97,19 +97,31 @@
 // Poll skip: probability of deferring a tick (mimics sensor NAK / missed poll).
 // ~3% at 1kHz → one skip every ~33ms → matches real mouse behaviour.
 // Uses geometric distribution: P(skip) evaluated per tick via LFSR threshold.
-#define SMOOTH_TIMING_SKIP_PROB_INV  33     // 1/33 ≈ 3% per tick
+#define SMOOTH_TIMING_SKIP_PROB_INV  25     // 1/25 = 4% per tick
 // Maximum consecutive skips (prevents multi-frame gaps that look like stalls)
-#define SMOOTH_TIMING_MAX_CONSEC_SKIP 1
+#define SMOOTH_TIMING_MAX_CONSEC_SKIP 2
 
 // PIT reload jitter: ±fraction of base LDVAL added each tick.
 // Broadens interval distribution toward natural CV ~0.15-0.25.
 // Real mice at 1kHz: std ~100µs, mean ~1000µs → CV ~0.10.
 // We target slightly higher to account for USB host scheduling smoothing.
-#define SMOOTH_TIMING_LDVAL_JITTER   0.08f  // ±8% of base interval
+#define SMOOTH_TIMING_LDVAL_JITTER   0.20f  // ±20% of base interval
 
 // Per-session poll rate personality: slight offset to base interval.
 // Real mice vary ±2-5% between units due to oscillator tolerance.
-#define SMOOTH_TIMING_RATE_OFFSET    0.03f  // ±3% session bias on interval
+#define SMOOTH_TIMING_RATE_OFFSET    0.05f  // ±5% session bias on interval
+
+// ---- Persistent micro-tremor ----
+// Fills zero-movement gaps between injection commands with Brownian-like
+// micro-movements. Prevents bimodal interval distribution (the primary
+// synthetic signature). Mean-reverting to prevent drift.
+#define SMOOTH_TREMOR_STEP           0.30f   // px, random walk step per frame
+#define SMOOTH_TREMOR_DECAY          0.88f   // mean-reversion factor
+
+// ---- Dithered rounding ----
+// Varies sub-pixel rounding threshold ±RANGE around 0.5 to break up
+// repeated identical integer deltas from smooth easing curves.
+#define SMOOTH_DITHER_RANGE          0.30f
 
 // ---- PRNG ----
 // SFC32 warmup rounds (recommended 12+ for full diffusion)
