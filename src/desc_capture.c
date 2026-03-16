@@ -1,4 +1,4 @@
-// USB descriptor capture — sequential blocking enumeration
+// USB descriptor capture
 #include <string.h>
 #include "imxrt.h"
 #include "usb_host.h"
@@ -196,7 +196,6 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		}
 	}
 
-	// SET_CONFIGURATION — required before device will respond on interrupt EPs
 	setup.bmRequestType = 0x00;
 	setup.bRequest = USB_REQ_SET_CONFIG;
 	setup.wValue = desc->config_desc[5]; // bConfigurationValue
@@ -216,7 +215,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		setup.wLength = 0;
 		usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
 			&setup, NULL, 2000);
-		// Don't fail on error — some devices STALL SET_IDLE legally
+		// Don't fail on error, some devices STALL SET_IDLE legally
 	}
 
 	desc->valid = true;

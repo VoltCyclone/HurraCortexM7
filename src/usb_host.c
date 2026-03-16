@@ -1,5 +1,8 @@
 // EHCI USB Host controller driver for Teensy 4.1 USB2 port
-// Bare-metal, polled (no interrupts), blocking control transfers only.
+// Bare-metal, polled transfer completion (QH token checks).
+// A minimal USB2 ISR clears USBSTS so SEVONPEND can wake WFE
+// on transfer completion, giving sub-µs wakeup instead of waiting
+// for the next PIT0 tick (~1 ms).
 //
 // DMA buffers are in a non-cacheable MPU region (.dmabuffers at 0x20200000).
 // No manual cache maintenance needed — bare DSBs drain the write buffer
@@ -32,6 +35,14 @@ static uint8_t     num_intr_eps = 0;
 static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned(4096)));
 
 static uint8_t device_speed = USB_SPEED_FULL;
+
+// Minimal USB2 ISR — clears USBSTS so the interrupt deasserts.
+// The NVIC pending → event path (SEVONPEND) wakes WFE in the main loop.
+// Transfer results are consumed by polling QH/qTD tokens, not USBSTS.
+static void usb2_isr(void)
+{
+	USB2_USBSTS = USB2_USBSTS; // W1C all pending status bits
+}
 
 static inline void host_power_on(void)
 {
@@ -108,7 +119,13 @@ bool usb_host_init(void)
 	qh_async.token = 0;
 	asm volatile("dsb" ::: "memory");
 	USB2_SBUSCFG = 1; // burst-aligned bus access (per PJRC)
-	USB2_USBINTR = 0; // No interrupts — we poll
+	// Enable USB completion interrupt so SEVONPEND wakes WFE
+	// immediately on transfer completion (sub-µs vs ~1 ms PIT0 tick).
+	// The ISR just clears USBSTS; transfer results come from QH tokens.
+	attachInterruptVector(IRQ_USB2, usb2_isr);
+	NVIC_SET_PRIORITY(IRQ_USB2, 144); // low priority, below DMA (96)
+	NVIC_ENABLE_IRQ(IRQ_USB2);
+	USB2_USBINTR = USB_USBINTR_UE; // interrupt on transfer completion
 	USB2_PERIODICLISTBASE = (uint32_t)periodic_list;
 	USB2_FRINDEX = 0;
 	USB2_ASYNCLISTADDR = 0; // No async list yet (per PJRC; set when first transfer)

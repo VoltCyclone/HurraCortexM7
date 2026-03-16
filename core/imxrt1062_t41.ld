@@ -72,6 +72,15 @@ SECTIONS
 		. = ALIGN(32);
 	} > RAM
 
+	/* Fixed address past 128K non-cacheable MPU overlay (region 10)
+	   into cached AXI RAM.  Large read-mostly buffers (e.g. TFT
+	   framebuffers) live here: D-cache gives near-TCM speed while
+	   freeing precious DTCM. */
+	.bss.axicached 0x20220000 (NOLOAD) : {
+		*(.axicached)
+		. = ALIGN(32);
+	} > RAM
+
 	.bss.extram (NOLOAD) : {
 		*(SORT_BY_ALIGNMENT(SORT_BY_NAME(.externalram)))
 		. = ALIGN(32);
@@ -95,7 +104,7 @@ SECTIONS
 	_sbss = ADDR(.bss);
 	_ebss = ADDR(.bss) + SIZEOF(.bss);
 
-	_heap_start = ADDR(.bss.dma) + SIZEOF(.bss.dma);
+	_heap_start = ADDR(.bss.axicached) + SIZEOF(.bss.axicached);
 	_heap_end = ORIGIN(RAM) + LENGTH(RAM);
 
 	_extram_start = ADDR(.bss.extram);

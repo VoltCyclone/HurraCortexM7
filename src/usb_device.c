@@ -1,7 +1,12 @@
 // USB Device controller driver for Teensy 4.1 USB1 port
 // Replays captured descriptors and forwards HID reports.
 // Supports composite devices with multiple interrupt IN endpoints.
-// Bare-metal, polled (no interrupts).
+//
+// USB1_USBINTR enables (UE|UEE|URE|SLE) cause the controller to assert
+// its IRQ line on bus events.  No ISR is installed — the NVIC pending
+// bit alone wakes WFE via SEVONPEND (set in main).  usb_device_poll()
+// reads and clears USB1_USBSTS, which deasserts the IRQ line and
+// clears the NVIC pending bit (level-sensitive).
 //
 // DMA buffers are in a non-cacheable MPU region (.dmabuffers at 0x20200000).
 // No manual cache maintenance needed — bare DSBs drain the write buffer

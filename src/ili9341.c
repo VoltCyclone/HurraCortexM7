@@ -1,10 +1,8 @@
 #include "tft.h"
 
-#if TFT_DRIVER == TFT_DRIVER_ILI9341
-
 extern void delay(uint32_t msec);
 
-void tft_preflight(void)
+void ili9341_init_sequence(void)
 {
 	// Software reset
 	tft_command(0x01, 0, 0);
@@ -53,8 +51,8 @@ void tft_preflight(void)
 	uint8_t colmod = 0x55;
 	tft_command(0x3A, &colmod, 1);
 
-	// Frame rate: DIVA=0 (fosc), RTNA=0x18 → ~70 Hz internal refresh
-	uint8_t frmctr1[] = { 0x00, 0x18 };
+	// Frame rate: DIVA=0 (fosc), RTNA=0x13 → ~76 Hz internal refresh
+	uint8_t frmctr1[] = { 0x00, 0x13 };
 	tft_command(0xB1, frmctr1, sizeof frmctr1);
 
 	// Display function control
@@ -81,10 +79,6 @@ void tft_preflight(void)
 	};
 	tft_command(0xE1, ngamctrl, sizeof ngamctrl);
 
-	// Enable tearing effect output on V-blank (for tear-free sync)
-	uint8_t teon[] = { 0x00 };
-	tft_command(0x35, teon, sizeof teon);
-
 	// Sleep out — must come after all config, before display on
 	tft_command(0x11, 0, 0);
 	delay(120);
@@ -93,15 +87,8 @@ void tft_preflight(void)
 	tft_command(0x29, 0, 0);
 
 	// Set initial window
-	uint8_t caset[] = { 0, 0, (TFT_WIDTH - 1) >> 8, (TFT_WIDTH - 1) & 0xFF };
+	uint8_t caset[] = { 0, 0, (tft_w - 1) >> 8, (tft_w - 1) & 0xFF };
 	tft_command(0x2A, caset, sizeof caset);
-	uint8_t paset[] = { 0, 0, (TFT_HEIGHT - 1) >> 8, (TFT_HEIGHT - 1) & 0xFF };
+	uint8_t paset[] = { 0, 0, (tft_h - 1) >> 8, (tft_h - 1) & 0xFF };
 	tft_command(0x2B, paset, sizeof paset);
 }
-
-void tft_begin_sync(void)
-{
-	tft_command(0x2C, 0, 0);
-}
-
-#endif // TFT_DRIVER == TFT_DRIVER_ILI9341

@@ -7,20 +7,15 @@ TARGET  = firmware
 
 MCU_FLAGS = -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb
 
-# Pass TFT=1 to enable TFT display (e.g. make TFT=1)
+# Pass TFT=1 to enable TFT display (auto-detects ILI9341 vs ST7735 at boot)
 TFT ?= 1
-# TFT driver: 1=ST7735 (128x160), 3=ILI9341 (240x320)
-TFT_DRIVER ?= 3
-# Pass TOUCH=1 to enable FT6206 capacitive touch (requires TFT_DRIVER=3)
-TOUCH ?= 1
 # Pass NET=1 to enable Ethernet (KMBox Net UDP protocol, replaces UART commands)
 NET ?= 0
 # Command UART baud rate — LPUART6 on Teensy pins 0/1
 CMD_BAUD ?= 4000000
 
 DEFINES = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DF_CPU=816000000 \
-          -DTFT_ENABLED=$(TFT) -DTFT_DRIVER=$(TFT_DRIVER) \
-          -DTOUCH_ENABLED=$(TOUCH) \
+          -DTFT_ENABLED=$(TFT) \
           -DNET_ENABLED=$(NET) -DCMD_BAUD=$(CMD_BAUD)
 
 CFLAGS = $(MCU_FLAGS) $(DEFINES) \
@@ -56,7 +51,7 @@ $(TARGET).hex: $(TARGET).elf
 # Hot-path sources get -O2 instead of -Os for better inlining/unrolling
 HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o src/smooth.o src/humanize.o \
           src/enet.o src/kmnet.o
-$(HOT_SRC): CFLAGS := $(subst -Os,-O2,$(CFLAGS))
+$(HOT_SRC): CFLAGS := $(subst -Os,-O2,$(CFLAGS)) -ffast-math
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<

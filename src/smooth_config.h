@@ -11,10 +11,10 @@
 // ---- Spread duration (microseconds) ----
 // How long to spread a movement over, by distance bucket.
 // Longer = smoother easing, shorter = more responsive.
-#define SMOOTH_SPREAD_SMALL_US       6000    // <20 px  (was 16000 — reduce latency/bimodality)
-#define SMOOTH_SPREAD_MEDIUM_US      9000    // 20-60 px
-#define SMOOTH_SPREAD_LARGE_US       7000    // 60-120 px
-#define SMOOTH_SPREAD_XLARGE_US      5000    // >120 px
+#define SMOOTH_SPREAD_SMALL_US       3500    // <20 px  (short to minimize cmd/obs gap)
+#define SMOOTH_SPREAD_MEDIUM_US      5000    // 20-60 px
+#define SMOOTH_SPREAD_LARGE_US       4000    // 60-120 px
+#define SMOOTH_SPREAD_XLARGE_US      3000    // >120 px
 
 // Distance thresholds for spread buckets (pixels)
 #define SMOOTH_SPREAD_SMALL_PX       20
@@ -31,7 +31,7 @@
 // ---- EWMA noise channels ----
 // Alpha for correlated noise (higher = slower drift, longer correlation)
 // 0.97 at 1kHz -> ~33ms correlation time (30Hz bandwidth)
-#define SMOOTH_EWMA_ALPHA            0.92f
+#define SMOOTH_EWMA_ALPHA            0.97f
 #define SMOOTH_EWMA_BETA             (1.0f - SMOOTH_EWMA_ALPHA)
 
 // ---- Speed perturbation ----
@@ -41,16 +41,16 @@
 // With EWMA alpha=0.97, speed_noise std ≈ 0.071.
 // At SCALE=0.55, short hops (gain≈2.0) → ~0.08 per-frame CV → ~0.16 movement CV
 // Long throws (gain≈0.55) → ~0.02 per-frame CV → ~0.04 movement CV
-#define SMOOTH_SPEED_NOISE_SCALE     2.0f
+#define SMOOTH_SPEED_NOISE_SCALE     0.55f
 
 // ---- Perpendicular wobble ----
 // Base wobble amplitude (pixels, before arc_scale)
-#define SMOOTH_PERP_AMPLITUDE        8.0f
+#define SMOOTH_PERP_AMPLITUDE        2.0f
 
 // Low-speed angle smoothing: wobble boost at low speeds
 // arc_scale = 1 + BOOST / (speed_px + 1)
-// At 1px/frame: ~3x, at 3px: ~1.5x, at 8px+: ~1x
-#define SMOOTH_LOWSPEED_BOOST        4.0f
+// At 1px/frame: ~2x, at 3px: ~1.4x, at 8px+: ~1.2x
+#define SMOOTH_LOWSPEED_BOOST        1.5f
 
 // ---- Session personality ranges ----
 // Arc bias: dominant perpendicular direction (randomized per session)
@@ -94,18 +94,16 @@
 //   - Gaussian-ish interval spread (natural CV)
 //   - Per-session poll rate personality
 //
-// Poll skip: probability of deferring a tick (mimics sensor NAK / missed poll).
-// ~3% at 1kHz → one skip every ~33ms → matches real mouse behaviour.
-// Uses geometric distribution: P(skip) evaluated per tick via LFSR threshold.
-#define SMOOTH_TIMING_SKIP_PROB_INV  25     // 1/25 = 4% per tick
-// Maximum consecutive skips (prevents multi-frame gaps that look like stalls)
-#define SMOOTH_TIMING_MAX_CONSEC_SKIP 2
+// Poll skip: DISABLED — creates bimodal interval distribution (detected as
+// synthetic by analyzers). Pure continuous jitter is sufficient.
+// #define SMOOTH_TIMING_SKIP_PROB_INV  25
+// #define SMOOTH_TIMING_MAX_CONSEC_SKIP 2
 
-// PIT reload jitter: ±fraction of base LDVAL added each tick.
-// Broadens interval distribution toward natural CV ~0.15-0.25.
-// Real mice at 1kHz: std ~100µs, mean ~1000µs → CV ~0.10.
-// We target slightly higher to account for USB host scheduling smoothing.
-#define SMOOTH_TIMING_LDVAL_JITTER   0.20f  // ±20% of base interval
+// PIT reload jitter: ±fraction of base LDVAL, applied via triangular
+// distribution (sum of 2 uniforms → bell-shaped, unimodal).
+// Triangular std = 0.408 * JITTER, so 0.22 → CV ≈ 0.09.
+// Real mice at 1kHz: CV ~0.05-0.15.
+#define SMOOTH_TIMING_LDVAL_JITTER   0.22f  // ±22% peak, ~9% CV via triangular
 
 // Per-session poll rate personality: slight offset to base interval.
 // Real mice vary ±2-5% between units due to oscillator tolerance.
@@ -121,10 +119,17 @@
 #define SMOOTH_TREMOR_DECAY          0.88f   // mean-reversion factor
 #define SMOOTH_TREMOR_IDLE_TIMEOUT   100     // frames after last injection to keep tremor alive
 
+// ---- Noise magnitude clamp ----
+// Maximum ratio of noise to base displacement per frame.
+// Prevents perpendicular wobble from dominating at low speeds where
+// fixed-amplitude noise can exceed actual movement by 10x+.
+// At 0.35: a 1px/frame movement allows 0.35px of noise.
+#define SMOOTH_NOISE_MAX_RATIO       0.35f
+
 // ---- Dithered rounding ----
 // Varies sub-pixel rounding threshold ±RANGE around 0.5 to break up
 // repeated identical integer deltas from smooth easing curves.
-#define SMOOTH_DITHER_RANGE          0.30f
+#define SMOOTH_DITHER_RANGE          0.35f
 
 // ---- PRNG ----
 // SFC32 warmup rounds (recommended 12+ for full diffusion)

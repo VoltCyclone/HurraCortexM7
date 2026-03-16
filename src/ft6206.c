@@ -215,7 +215,7 @@ touch_point_t ft6206_read(void)
 	uint16_t raw_x = ((uint16_t)(buf[1] & 0x0F) << 8) | buf[2];
 	uint16_t raw_y = ((uint16_t)(buf[3] & 0x0F) << 8) | buf[4];
 	pt.x = raw_x;
-	pt.y = 319 - raw_y;
+	pt.y = raw_y;
 	pt.valid = true;
 	return pt;
 }

@@ -20,9 +20,8 @@
 #include "udp.h"
 #include "enet.h"
 #endif
-#if TOUCH_ENABLED
 #include "ft6206.h"
-#endif
+#include "tft.h"
 
 extern uint32_t millis(void);
 extern void delay(uint32_t msec);
@@ -382,11 +381,17 @@ int main(void)
 	}
 	led_off();
 	led_pwm_init(); // Switch pin 13 to FlexPWM (no-op when TFT active)
+	bool touch_ok = false;
 #if TFT_ENABLED
 	tft_display_init();
-#endif
-#if TOUCH_ENABLED
-	ft6206_init();
+	// FT6206 touch is only on ILI9341 breakout boards
+	if (tft_detected_driver == TFT_DRIVER_ILI9341) {
+		touch_ok = ft6206_init();
+		if (!touch_ok) {
+			tft_display_error("FT6206 touch\nnot found on\nI2C1 (D18/D19)");
+			delay(3000);
+		}
+	}
 #endif
 	uint32_t report_count = 0;
 	uint32_t drop_count = 0;
@@ -429,11 +434,16 @@ int main(void)
 				&rpt_ptr, ep_map[m].maxpkt);
 			if (ret > 0 && rpt_ptr) {
 				did_work = true;
-				// Merge directly into DMA buffer — eliminates one memcpy
+				// Copy to stack (DTCM, 1-cycle access) for merge.
+				// The zerocopy buffer lives in non-cacheable AXI RAM
+				// (~8 cycles/access); doing the merge in DTCM is ~6×
+				// faster for the read-modify-write field operations.
+				uint8_t local_rpt[64];
+				__builtin_memcpy(local_rpt, rpt_ptr, (uint16_t)ret);
 				kmbox_merge_report(ep_map[m].iface_protocol,
-					rpt_ptr, ret);
+					local_rpt, ret);
 				bool sent = usb_device_send_report(
-					ep_map[m].dev_ep_num, rpt_ptr, ret);
+					ep_map[m].dev_ep_num, local_rpt, ret);
 				if (sent) {
 					report_count++;
 				} else {
@@ -450,13 +460,17 @@ int main(void)
 		kmbox_send_pending();
 
 		// Sleep until next event when idle — PIT ISR, USB completion,
-		// or UART DMA will set the event flag via SEVONPEND.
-		// Reduces power draw and frees bus bandwidth for DMA.
+		// DMA completion, or UART DMA will set the event flag via
+		// SEVONPEND.  Reduces power draw and frees bus bandwidth.
 		if (!did_work)
 			__asm volatile("wfe");
 
 #if TFT_ENABLED
-		if ((millis() - last_tft_update) >= 33) {
+		// Advance non-blocking TFT DMA state machine.  Fast no-op
+		// when idle; handles span boundaries when ISR signals done.
+		tft_sync_continue();
+
+		if ((millis() - last_tft_update) >= 33 && !tft_sync_busy()) {
 			uint32_t now = millis();
 			uint32_t dt = now - prev_report_time;
 			if (dt > 0)
@@ -500,17 +514,22 @@ int main(void)
 			};
 			__builtin_memcpy(st.usb_product, usb_product, sizeof(usb_product));
 			tft_display_update(&st);
+			// Non-blocking: swap + start DMA, return immediately.
+			// ISR chains rows; tft_sync_continue() above handles
+			// span transitions on subsequent loop iterations.
+			tft_swap_buffers();
+			tft_sync_begin();
 			last_tft_update = now;
 
-#if TOUCH_ENABLED
-			touch_point_t tp;
-			if (ft6206_poll(&tp) && tp.valid) {
-				if (tft_display_touch(tp.x, tp.y)) {
-					const tft_settings_t *cfg = tft_display_get_settings();
-					smooth_set_max_per_frame(cfg->smooth_max);
+			if (touch_ok) {
+				touch_point_t tp;
+				if (ft6206_poll(&tp) && tp.valid) {
+					if (tft_display_touch(tp.x, tp.y)) {
+						const tft_settings_t *cfg = tft_display_get_settings();
+						smooth_set_max_per_frame(cfg->smooth_max);
+					}
 				}
 			}
-#endif
 		}
 #endif
 		// PWM LED brightness: maps reports/sec to 0-255.

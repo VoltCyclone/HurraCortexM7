@@ -1,15 +1,11 @@
 // st7735.c — ST7735 TFT controller init sequence for i.MX RT1062
 // 128x160 RGB565 display over SPI
-// Ported from RaspberryKMBox/bridge/st7735.c
-// Only compiled when TFT_DRIVER == TFT_DRIVER_ST7735
 
 #include "tft.h"
 
-#if TFT_DRIVER == TFT_DRIVER_ST7735
-
 extern void delay(uint32_t msec);
 
-void tft_preflight(void)
+void st7735_init_sequence(void)
 {
 	// SWRESET
 	tft_command(0x01, 0, 0);
@@ -70,12 +66,12 @@ void tft_preflight(void)
 	uint8_t colmod = 0x05;
 	tft_command(0x3A, &colmod, 1);
 
-	// CASET: 0 to 127
-	uint8_t caset[] = { 0, 0, 0, TFT_WIDTH - 1 };
+	// CASET: 0 to width-1
+	uint8_t caset[] = { 0, 0, 0, (uint8_t)(tft_w - 1) };
 	tft_command(0x2A, caset, 4);
 
-	// RASET: 0 to 159
-	uint8_t raset[] = { 0, 0, 0, TFT_HEIGHT - 1 };
+	// RASET: 0 to height-1
+	uint8_t raset[] = { 0, 0, 0, (uint8_t)(tft_h - 1) };
 	tft_command(0x2B, raset, 4);
 
 	// GMCTRP1: positive gamma correction
@@ -100,11 +96,3 @@ void tft_preflight(void)
 	tft_command(0x29, 0, 0);
 	delay(100);
 }
-
-void tft_begin_sync(void)
-{
-	// RAMWR: start pixel data
-	tft_command(0x2C, 0, 0);
-}
-
-#endif // TFT_DRIVER == TFT_DRIVER_ST7735

@@ -513,6 +513,21 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 			+ (1.0f - SMOOTH_VELOCITY_ALPHA) * state.last_noise_vx;
 		float smoothed_ny = SMOOTH_VELOCITY_ALPHA * noise_y
 			+ (1.0f - SMOOTH_VELOCITY_ALPHA) * state.last_noise_vy;
+
+		// Cap noise magnitude relative to base movement.
+		// Prevents wobble from dominating at low speeds where fixed-amplitude
+		// perpendicular noise can exceed the actual displacement by 10x+.
+		float base_mag = fabsf((float)base_x) + fabsf((float)base_y);
+		if (base_mag > 0.0f) {
+			float noise_mag = fabsf(smoothed_nx) + fabsf(smoothed_ny);
+			float max_noise = base_mag * SMOOTH_NOISE_MAX_RATIO;
+			if (noise_mag > max_noise) {
+				float scale = max_noise / noise_mag;
+				smoothed_nx *= scale;
+				smoothed_ny *= scale;
+			}
+		}
+
 		state.last_noise_vx = smoothed_nx;
 		state.last_noise_vy = smoothed_ny;
 
@@ -668,25 +683,18 @@ uint32_t smooth_timing_next(uint32_t base_ldval, bool *out_skip)
 
 	if (!state.humanize) return base_ldval;
 
-	uint32_t r = timing_rand32();
-
-	// Poll skip: r uniform in [0, 2^32), skip if below threshold.
-	if (r < (0xFFFFFFFFu / SMOOTH_TIMING_SKIP_PROB_INV)
-	    && state.consec_skips < SMOOTH_TIMING_MAX_CONSEC_SKIP) {
-		*out_skip = true;
-		state.consec_skips++;
-		return base_ldval;
-	}
-	state.consec_skips = 0;
-
-	// LDVAL jitter: session bias + per-tick random offset.
-	float offset = state.rate_bias
-		+ timing_rand_uniform() * SMOOTH_TIMING_LDVAL_JITTER;
+	// Triangular jitter: sum of two uniform randoms produces a bell-shaped
+	// (tent) distribution — unimodal and more Gaussian-like than uniform.
+	// Eliminates bimodality that poll-skip mechanisms create.
+	float u1 = timing_rand_uniform(); // [-1, +1)
+	float u2 = timing_rand_uniform(); // [-1, +1)
+	float jitter = (u1 + u2) * 0.5f * SMOOTH_TIMING_LDVAL_JITTER;
+	float offset = state.rate_bias + jitter;
 	float result = (float)base_ldval * (1.0f + offset);
 
-	// Clamp to [50%, 200%] of base
-	float lo = (float)base_ldval * 0.5f;
-	float hi = (float)base_ldval * 2.0f;
+	// Clamp to [75%, 150%] of base
+	float lo = (float)base_ldval * 0.75f;
+	float hi = (float)base_ldval * 1.50f;
 	if (result < lo) result = lo;
 	if (result > hi) result = hi;
 

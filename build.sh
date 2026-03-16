@@ -59,27 +59,14 @@ printf "${RESET}"
 printf "  ${DIM}Teensy 4.1 (i.MX RT1062) firmware${RESET}\n"
 
 # ── TFT Display ─────────────────────────────────────────────────────────────
-tft_choice=$(prompt_choice "TFT Display:" \
-    "ILI9341 (240x320)" \
-    "ST7735  (128x160)" \
+tft_choice=$(prompt_choice "TFT Display (auto-detects ILI9341/ST7735):" \
+    "Enabled" \
     "Disabled")
 
 case "$tft_choice" in
-    1) TFT=1; TFT_DRIVER=3 ;;
-    2) TFT=1; TFT_DRIVER=1 ;;
-    3) TFT=0; TFT_DRIVER=1 ;;
+    1) TFT=1 ;;
+    2) TFT=0 ;;
 esac
-
-# ── Touch ───────────────────────────────────────────────────────────────────
-TOUCH=0
-if [[ "$TFT_DRIVER" -eq 3 && "$TFT" -eq 1 ]]; then
-    touch_choice=$(prompt_choice "Touch (FT6206):" \
-        "Enabled" \
-        "Disabled")
-    [[ "$touch_choice" -eq 1 ]] && TOUCH=1
-elif [[ "$TFT" -eq 1 ]]; then
-    printf "\n${DIM}  Touch skipped (requires ILI9341)${RESET}\n"
-fi
 
 # ── Command Input ────────────────────────────────────────────────────────
 # LPUART6 (pins 0/1) — command UART to host bridge.
@@ -112,9 +99,8 @@ case "$cmd_choice" in
         NET=1
         # NET mode requires TFT for IP/port/UUID display
         if [[ "$TFT" -eq 0 ]]; then
-            printf "\n${YELLOW}  Note: Ethernet mode requires TFT — enabling ST7735${RESET}\n"
+            printf "\n${YELLOW}  Note: Ethernet mode requires TFT — enabling display${RESET}\n"
             TFT=1
-            TFT_DRIVER=1
         fi
         ;;
 esac
@@ -141,14 +127,13 @@ PARALLEL=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 printf "\n${BOLD}  ┌─ Build Configuration ─────────────────┐${RESET}\n"
 
 if [[ "$TFT" -eq 1 ]]; then
-    [[ "$TFT_DRIVER" -eq 1 ]] && tft_label="ST7735 (128x160)" || tft_label="ILI9341 (240x320)"
-    printf "  │  Display:    ${GREEN}%-25s${RESET} │\n" "$tft_label"
+    printf "  │  Display:    ${GREEN}%-25s${RESET} │\n" "Auto-detect"
 else
     printf "  │  Display:    ${DIM}%-25s${RESET} │\n" "Disabled"
 fi
 
-if [[ "$TOUCH" -eq 1 ]]; then
-    printf "  │  Touch:      ${GREEN}%-25s${RESET} │\n" "FT6206"
+if [[ "$TFT" -eq 1 ]]; then
+    printf "  │  Touch:      ${GREEN}%-25s${RESET} │\n" "Auto (ILI9341 only)"
 else
     printf "  │  Touch:      ${DIM}%-25s${RESET} │\n" "Disabled"
 fi
@@ -178,8 +163,6 @@ printf "\n"
 
 MAKE_ARGS=(
     "TFT=${TFT}"
-    "TFT_DRIVER=${TFT_DRIVER}"
-    "TOUCH=${TOUCH}"
     "NET=${NET}"
     "CMD_BAUD=${CMD_BAUD}"
     "-j${PARALLEL}"

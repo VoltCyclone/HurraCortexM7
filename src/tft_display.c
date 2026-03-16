@@ -1,6 +1,6 @@
 // tft_display.c — Stats + settings rendering for USB proxy TFT display
-// Supports ST7735 (21×20 grid) and ILI9341 (40×40 grid) via TFT_DRIVER
-// Touch-driven settings menu on ILI9341 when TOUCH_ENABLED
+// Supports ST7735 (21×20 grid) and ILI9341 (40×40 grid) via runtime detection
+// Touch-driven settings menu on ILI9341 when detected
 
 #include "tft_display.h"
 #include "tft.h"
@@ -70,6 +70,13 @@ static tft_settings_t g_settings = {
 	.backlight        = true,
 };
 static uint8_t g_selected_setting = 0;
+
+// ---- Rate history for throughput graph (ILI9341 only) ----
+#define RATE_HIST_LEN  34
+static uint32_t g_rate_hist[RATE_HIST_LEN];
+static uint8_t  g_rate_hist_wr;
+static uint8_t  g_graph_tick;
+static uint32_t g_peak_rate;
 
 static void draw_stats(const tft_proxy_stats_t *s)
 {
@@ -314,15 +321,91 @@ static void draw_stats(const tft_proxy_stats_t *s)
 
 #undef UPTIME_LINE
 
-#if TFT_DRIVER == TFT_DRIVER_ILI9341
-	// Bottom touch zone indicator (line 39)
-	draw_separator(LINE(37));
-	int settings_col = (TFT_COLS - 14) / 2;
-	tft_draw_string(COL(settings_col), LINE(38), COL_DIM, "Tap for Setup");
-#endif
-}
+	if (tft_detected_driver == TFT_DRIVER_ILI9341) {
+		// ---- Throughput history graph (lines 20-35) ----
+		// Sample rate into ring buffer every ~1s (30 frames at 30Hz)
+		g_graph_tick++;
+		if (g_graph_tick >= 30) {
+			g_graph_tick = 0;
+			g_rate_hist[g_rate_hist_wr] = s->reports_per_sec;
+			g_rate_hist_wr = (g_rate_hist_wr + 1) % RATE_HIST_LEN;
+			if (s->reports_per_sec > g_peak_rate)
+				g_peak_rate = s->reports_per_sec;
+		}
 
-#if TFT_DRIVER == TFT_DRIVER_ILI9341
+		draw_separator(LINE(20));
+
+		// Section title + peak rate
+		tft_draw_string(COL(1), LINE(21), COL_CYAN, "THROUGHPUT");
+		p = buf;
+		*p++ = 'p'; *p++ = 'k'; *p++ = ' ';
+		p = u32_to_str(p, g_peak_rate);
+		fmt_done(buf, p);
+		tft_draw_string_right(TFT_WIDTH - COL(1), LINE(21), COL_DIM, buf);
+
+		// Auto-scale Y axis
+		uint32_t mx = 10;
+		for (int i = 0; i < RATE_HIST_LEN; i++)
+			if (g_rate_hist[i] > mx) mx = g_rate_hist[i];
+		if (mx < 100)
+			mx = ((mx + 9) / 10) * 10;
+		else
+			mx = ((mx + 99) / 100) * 100;
+
+		// Graph bounds
+		int gx0 = COL(5);
+		int gx1 = TFT_WIDTH - COL(1);
+		int gy0 = LINE(23);
+		int gy1 = LINE(34);
+		int gh  = gy1 - gy0;
+
+		// Y-axis labels
+		p = buf; p = u32_to_str(p, mx); fmt_done(buf, p);
+		tft_draw_string_right(gx0 - 2, gy0, COL_DIM, buf);
+		tft_draw_string_right(gx0 - 2, gy1 - FH, COL_DIM, "0");
+
+		// Mid-line dotted grid + label
+		int mid_y = gy0 + gh / 2;
+		for (int x = gx0; x <= gx1; x += 4)
+			tft_draw_pixel(x, mid_y, COL_DARK);
+		p = buf; p = u32_to_str(p, mx / 2); fmt_done(buf, p);
+		tft_draw_string_right(gx0 - 2, mid_y - FH / 2, COL_DIM, buf);
+
+		// Left axis (vertical) + bottom axis (horizontal)
+		tft_draw_rect(gx0 - 1, gy0, gx0 - 1, gy1, COL_DIM);
+		tft_draw_hline(gx0 - 1, gx1, gy1 + 1, COL_DIM);
+
+		// Draw bars (oldest left → newest right)
+		int bar_step = (gx1 - gx0) / RATE_HIST_LEN;
+		int bar_w = bar_step - 1;
+		if (bar_w < 1) bar_w = 1;
+		int newest = (g_rate_hist_wr + RATE_HIST_LEN - 1) % RATE_HIST_LEN;
+
+		for (int i = 0; i < RATE_HIST_LEN; i++) {
+			int idx = (g_rate_hist_wr + i) % RATE_HIST_LEN;
+			uint32_t val = g_rate_hist[idx];
+			if (val == 0) continue;
+
+			int bh = (int)((val * (uint32_t)gh) / mx);
+			if (bh < 1) bh = 1;
+			if (bh > gh) bh = gh;
+
+			int bx = gx0 + i * bar_step;
+			uint8_t col = (idx == newest) ? COL_CYAN : COL_GREEN;
+
+			tft_draw_rect(bx, gy1 - bh, bx + bar_w - 1, gy1 - 1, col);
+		}
+
+		// Time scale hint
+		tft_draw_string_right(TFT_WIDTH - COL(1), LINE(35), COL_DIM,
+			"~34s");
+
+		// Bottom touch zone indicator
+		draw_separator(LINE(37));
+		int settings_col = (TFT_COLS - 14) / 2;
+		tft_draw_string(COL(settings_col), LINE(38), COL_DIM, "Tap for Setup");
+	}
+}
 
 typedef struct {
 	const char *label;
@@ -407,13 +490,16 @@ static void draw_settings(void)
 	int back_col = (TFT_COLS - 4) / 2;
 	tft_draw_string(COL(back_col), LINE(MENU_BACK_Y), COL_CYAN, "Back");
 }
-#endif // TFT_DRIVER == TFT_DRIVER_ILI9341
 
 // ---- Touch handling ----
 
 bool tft_display_touch(uint16_t x, uint16_t y)
 {
-#if TFT_DRIVER == TFT_DRIVER_ILI9341
+	if (tft_detected_driver != TFT_DRIVER_ILI9341) {
+		(void)x; (void)y;
+		return false;
+	}
+
 	if (g_view == TFT_VIEW_STATS) {
 		// Tap bottom zone to enter settings
 		if (y >= (uint16_t)LINE(37)) {
@@ -466,9 +552,7 @@ bool tft_display_touch(uint16_t x, uint16_t y)
 			}
 		}
 	}
-#else
-	(void)x; (void)y;
-#endif
+
 	return false;
 }
 
@@ -492,28 +576,26 @@ void tft_display_init(void)
 	tft_draw_string(COL(title_col), LINE(TFT_ROWS / 2 - 2), COL_CYAN, "IMXRTNSY");
 	int sub_col = (TFT_COLS - 13) / 2;
 	tft_draw_string(COL(sub_col), LINE(TFT_ROWS / 2), COL_GRAY, "USB HID Proxy");
-#if TFT_DRIVER == TFT_DRIVER_ILI9341
-	int drv_col = (TFT_COLS - 11) / 2;
-	tft_draw_string(COL(drv_col), LINE(TFT_ROWS / 2 + 2), COL_DARK, "ILI9341 TFT");
-#else
-	int drv_col = (TFT_COLS - 10) / 2;
-	tft_draw_string(COL(drv_col), LINE(TFT_ROWS / 2 + 2), COL_DARK, "ST7735 TFT");
-#endif
+	if (tft_detected_driver == TFT_DRIVER_ILI9341) {
+		int drv_col = (TFT_COLS - 11) / 2;
+		tft_draw_string(COL(drv_col), LINE(TFT_ROWS / 2 + 2), COL_DARK, "ILI9341 TFT");
+	} else {
+		int drv_col = (TFT_COLS - 10) / 2;
+		tft_draw_string(COL(drv_col), LINE(TFT_ROWS / 2 + 2), COL_DARK, "ST7735 TFT");
+	}
 	tft_swap_sync();
 }
 
 void tft_display_update(const tft_proxy_stats_t *stats)
 {
-#if TFT_DRIVER == TFT_DRIVER_ILI9341
-	if (g_view == TFT_VIEW_SETTINGS) {
+	if (tft_detected_driver == TFT_DRIVER_ILI9341 &&
+	    g_view == TFT_VIEW_SETTINGS) {
 		draw_settings();
 	} else {
 		draw_stats(stats);
 	}
-#else
-	draw_stats(stats);
-#endif
-	tft_swap_sync();
+	// Caller handles non-blocking sync via tft_swap_buffers() +
+	// tft_sync_begin() to keep the CPU free for USB work.
 }
 
 void tft_display_error(const char *msg)
