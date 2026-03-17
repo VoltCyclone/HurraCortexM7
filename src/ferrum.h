@@ -2,30 +2,34 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Ferrum KM API text protocol parser
-// Format: km.command(arg1, arg2)\n  Response: >>>\r\n
-// Supported: move, left, right, middle, side1, side2, wheel
-// Keyboard commands are unsupported (returns false).
+// Ferrum KM API text protocol parser (matches FerrumAPI.py wire format)
+// Wire: km.mouse_move(dx,dy)\r  km.mouse_button_press(code)\r  etc.
+// Button codes are bitmasks: 1=left, 2=right, 4=middle, 8=side1, 16=side2
+// Response: >>>\r\n
+// Version: responds with "Ferrum" identifier for device detection
 
 #define FERRUM_MAX_LINE 128
 
-// Result of parsing a Ferrum text line
 typedef struct {
 	int16_t  mouse_dx;
 	int16_t  mouse_dy;
 	uint8_t  mouse_buttons;  // full button mask after applying command
 	int8_t   mouse_wheel;
-	bool     has_mouse;      // true if mouse state changed
-	bool     has_keyboard;   // true if keyboard command (unsupported)
-	bool     needs_response; // true if >>> response should be sent
+	bool     has_mouse;
 	bool     click_release;  // true = schedule button release after click
-	// Optional text response (for km.version, km.isdown, etc.)
+
+	uint8_t  kb_modifier;
+	uint8_t  kb_keys[6];
+	bool     has_keyboard;
+	bool     kb_click_release;
+	uint8_t  kb_release_key;
+
+	bool     needs_response;
 	const char *text_response; // NULL = no extra text before >>>
 } ferrum_result_t;
 
-// Initialize Ferrum parser (resets button state)
 void ferrum_init(void);
 
-// Parse a complete text line (without trailing \n or \r\n).
-// Returns true if the line was a recognized command.
+// Parse a complete text line (without trailing \r or \r\n).
+// Returns true if the line was a recognized Ferrum command.
 bool ferrum_parse_line(const char *line, uint8_t len, ferrum_result_t *out);

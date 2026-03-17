@@ -20,6 +20,9 @@
 #include "udp.h"
 #include "enet.h"
 #endif
+#if BT_ENABLED
+#include "bt.h"
+#endif
 #include "ft6206.h"
 #include "tft.h"
 
@@ -136,19 +139,13 @@ typedef struct {
 
 // ---- PIT0: smooth injection timing with humanized jitter ----
 static volatile bool pit_tick_pending;
-static volatile bool pit_tick_skip;      // true = suppress this frame (missed poll)
+static volatile uint32_t pit_next_ldval; // precomputed by main loop
 static uint32_t pit_base_ldval;          // nominal reload value (set after enumeration)
 
 static void pit0_isr(void)
 {
 	PIT_TFLG0 = PIT_TFLG_TIF;
-
-	// Compute next interval + skip decision (all integer, ~12 cycles)
-	bool skip = false;
-	uint32_t next_ldval = smooth_timing_next(pit_base_ldval, &skip);
-	PIT_LDVAL0 = next_ldval;
-
-	pit_tick_skip = skip;
+	PIT_LDVAL0 = pit_next_ldval; // precomputed, no FPU in ISR
 	pit_tick_pending = true;
 }
 
@@ -162,21 +159,14 @@ static int32_t  hot_temp;
 
 static void tempmon_init(void)
 {
-	// Enable OCOTP clock for fuse reads
 	CCM_CCGR2 |= CCM_CCGR2_OCOTP_CTRL(CCM_CCGR_ON);
-
-	// Read factory calibration from ANA1 fuse:
-	// bits [31:20] = hot_count (12-bit), bits [19:12] = hot_temp (8-bit)
 	uint32_t ana1 = HW_OCOTP_ANA1;
 	hot_count  = (ana1 >> 20) & 0xFFF;
 	hot_temp   = (int32_t)((ana1 >> 12) & 0xFF);
-	// room_count is stored as offset from hot_count in some revisions;
-	// ANA2 has the actual room count on IMXRT1062
 	uint32_t ana2 = HW_OCOTP_ANA2;
 	room_count = (ana2 >> 20) & 0xFFF;
-	if (room_count == 0) room_count = hot_count - 35; // fallback
-
-	// Power up TEMPMON, enable periodic measurement
+	if (room_count == 0 || room_count == hot_count)
+		room_count = hot_count - 35; // fallback: avoid div-by-zero
 	TEMPMON_TEMPSENSE0_CLR = TEMPMON_CTRL0_POWER_DOWN;
 	TEMPMON_TEMPSENSE1 = TEMPMON_CTRL1_MEASURE_FREQ(0x03FF); // ~2Hz
 	TEMPMON_TEMPSENSE0_SET = TEMPMON_CTRL0_MEASURE_TEMP;
@@ -237,6 +227,9 @@ int main(void)
 	kmnet_init();
 #endif
 	kmbox_init();
+#if BT_ENABLED
+	bt_init();
+#endif
 
 	// PIT0: smooth injection timer — clock/ISR now, rate set after enumeration
 	CCM_CCGR1 |= CCM_CCGR1_PIT(CCM_CCGR_ON);
@@ -258,14 +251,11 @@ int main(void)
 	uint32_t host_wait_loops = 0;
 	while (!usb_host_device_connected()) {
 		usb_host_power_on();
-		// State: waiting for device on USB2 host port — idle between blinks
+		kmbox_poll(); // respond to UART identity probes during init
 		__asm volatile("wfe");
 		led_wait_once(1, 70, 120, 650);
 		host_wait_loops++;
-
-		// Timeout after ~45s of connect attempts.
 		if (host_wait_loops > 60u) {
-			// No host-side USB device detected within timeout window
 			led_blink_forever(7, 80, 120);
 		}
 	}
@@ -286,35 +276,20 @@ int main(void)
 	char usb_product[22];
 	desc_product_string(usb_product, sizeof(usb_product));
 
+	// capture_descriptors() already sends SET_CONFIG and SET_IDLE.
+	// Send SET_PROTOCOL (Report Protocol) for each HID interface.
 	usb_setup_t setup;
-	setup.bmRequestType = 0x00;
-	setup.bRequest = USB_REQ_SET_CONFIG;
-	setup.wValue = desc.config_desc[5]; // bConfigurationValue
-	setup.wIndex = 0;
-	setup.wLength = 0;
-	int ret = usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
-		&setup, NULL, 2000);
-	(void)ret;
-	delay(10);
-
+	int ret;
 	for (uint8_t i = 0; i < desc.num_ifaces; i++) {
-		// SET_IDLE: bmRequestType=0x21 (class, interface), bRequest=0x0A
-		setup.bmRequestType = 0x21;
-		setup.bRequest = 0x0A; // SET_IDLE
-		setup.wValue = 0;      // duration=0 (indefinite), report ID=0 (all)
-		setup.wIndex = i;      // interface number
-		setup.wLength = 0;
-		usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
-			&setup, NULL, 2000);
-
 		// SET_PROTOCOL: bmRequestType=0x21, bRequest=0x0B
 		setup.bmRequestType = 0x21;
 		setup.bRequest = 0x0B; // SET_PROTOCOL
 		setup.wValue = 1;      // 1 = Report Protocol (not Boot Protocol)
-		setup.wIndex = i;
+		setup.wIndex = desc.ifaces[i].iface_num;
 		setup.wLength = 0;
-		usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
+		ret = usb_host_control_transfer(desc.dev_addr, desc.ep0_maxpkt,
 			&setup, NULL, 2000);
+		(void)ret;
 	}
 	ep_mapping_t ep_map[MAX_INTR_EPS];
 	uint8_t num_ep_mappings = 0;
@@ -357,6 +332,7 @@ int main(void)
 		uint32_t ipg_mhz = (F_CPU / 4u) / 1000000u; // IPG = ARM / 4
 		uint32_t ldval = (ipg_mhz * interval_us) - 1;
 		pit_base_ldval = ldval;
+		pit_next_ldval = ldval;
 		PIT_LDVAL0 = ldval;
 		PIT_TCTRL0 = PIT_TCTRL_TIE | PIT_TCTRL_TEN;
 		smooth_init(interval_us);
@@ -370,6 +346,7 @@ int main(void)
 	uint32_t dev_led_toggle = millis();
 	while (!usb_device_is_configured()) {
 		usb_device_poll();
+		kmbox_poll(); // respond to UART identity probes during init
 		if ((millis() - dev_led_toggle) >= 250) {
 			led_toggle();
 			dev_led_toggle = millis();
@@ -380,7 +357,7 @@ int main(void)
 		}
 	}
 	led_off();
-	led_pwm_init(); // Switch pin 13 to FlexPWM (no-op when TFT active)
+	led_pwm_init();
 	bool touch_ok = false;
 #if TFT_ENABLED
 	tft_display_init();
@@ -415,17 +392,22 @@ int main(void)
 #else
 		kmbox_poll();
 #endif
+#if BT_ENABLED
+		bt_poll();
+#endif
 		bool did_work = false;
 		if (pit_tick_pending) {
 			pit_tick_pending = false;
 			did_work = true;
-			if (!pit_tick_skip) {
+			// Compute next PIT interval (FPU math, safe in main loop)
+			bool skip = false;
+			uint32_t next_ldval = smooth_timing_next(pit_base_ldval, &skip);
+			pit_next_ldval = next_ldval;
+			if (!skip) {
 				int16_t sx, sy;
 				smooth_process_frame(&sx, &sy);
 				if (sx || sy) kmbox_inject_smooth(sx, sy);
 			}
-			// When skip=true, no report this tick — mimics missed USB poll.
-			// Accumulated sub-pixel state preserved; next frame catches up.
 		}
 
 		for (uint8_t m = 0; m < num_ep_mappings; m++) {
@@ -434,16 +416,10 @@ int main(void)
 				&rpt_ptr, ep_map[m].maxpkt);
 			if (ret > 0 && rpt_ptr) {
 				did_work = true;
-				// Copy to stack (DTCM, 1-cycle access) for merge.
-				// The zerocopy buffer lives in non-cacheable AXI RAM
-				// (~8 cycles/access); doing the merge in DTCM is ~6×
-				// faster for the read-modify-write field operations.
-				uint8_t local_rpt[64];
-				__builtin_memcpy(local_rpt, rpt_ptr, (uint16_t)ret);
 				kmbox_merge_report(ep_map[m].iface_protocol,
-					local_rpt, ret);
+					rpt_ptr, ret);
 				bool sent = usb_device_send_report(
-					ep_map[m].dev_ep_num, local_rpt, ret);
+					ep_map[m].dev_ep_num, rpt_ptr, ret);
 				if (sent) {
 					report_count++;
 				} else {
@@ -458,10 +434,6 @@ int main(void)
 			led_off_time = 0;
 		}
 		kmbox_send_pending();
-
-		// Sleep until next event when idle — PIT ISR, USB completion,
-		// DMA completion, or UART DMA will set the event flag via
-		// SEVONPEND.  Reduces power draw and frees bus bandwidth.
 		if (!did_work)
 			__asm volatile("wfe");
 
@@ -478,11 +450,19 @@ int main(void)
 			prev_report_count = report_count;
 			prev_report_time = now;
 
+			uint8_t proto = kmbox_protocol_mode();
+#if BT_ENABLED
+			if (proto == 0) proto = bt_protocol_mode();
+#endif
 			tft_proxy_stats_t st = {
 				.host_connected    = usb_host_device_connected(),
 				.device_configured = usb_device_is_configured(),
-				.kmbox_active      = kmbox_frame_count() > 0,
-				.protocol_mode     = 0,
+				.kmbox_active      = kmbox_frame_count() > 0
+#if BT_ENABLED
+				                     || bt_frame_count() > 0
+#endif
+				                     ,
+				.protocol_mode     = proto,
 				.num_endpoints     = num_ep_mappings,
 				.device_speed      = speed,
 				.report_count      = report_count,
@@ -498,6 +478,7 @@ int main(void)
 				.uart_framing      = kmbox_uart_framing(),
 				.uart_noise        = kmbox_uart_noise(),
 				.uart_rx_bytes     = kmbox_rx_byte_count(),
+			.uart_tx_bytes     = kmbox_tx_byte_count(),
 				.uptime_sec        = now / 1000,
 				.cpu_temp_c        = tempmon_read(),
 				.usb_vid           = usb_vid,
@@ -511,19 +492,24 @@ int main(void)
 				.net_rx_count      = kmnet_rx_count(),
 				.net_tx_count      = kmnet_tx_count(),
 #endif
+#if BT_ENABLED
+				.bt_connected      = bt_connected(),
+				.bt_baud           = bt_get_baud(),
+				.bt_frames_ok      = bt_frame_count(),
+				.bt_frames_err     = bt_error_count(),
+				.bt_rx_bytes       = bt_rx_byte_count(),
+#endif
 			};
 			__builtin_memcpy(st.usb_product, usb_product, sizeof(usb_product));
 			tft_display_update(&st);
-			// Non-blocking: swap + start DMA, return immediately.
-			// ISR chains rows; tft_sync_continue() above handles
-			// span transitions on subsequent loop iterations.
 			tft_swap_buffers();
 			tft_sync_begin();
 			last_tft_update = now;
 
 			if (touch_ok) {
 				touch_point_t tp;
-				if (ft6206_poll(&tp) && tp.valid) {
+				bool pressed = ft6206_poll(&tp);
+				if (pressed && tp.valid) {
 					if (tft_display_touch(tp.x, tp.y)) {
 						const tft_settings_t *cfg = tft_display_get_settings();
 						smooth_set_max_per_frame(cfg->smooth_max);
@@ -532,12 +518,9 @@ int main(void)
 			}
 		}
 #endif
-		// PWM LED brightness: maps reports/sec to 0-255.
-		// ~1000 rpt/s = full brightness, 0 = off. Updated every 100ms.
 		if ((millis() - led_pwm_update) >= 100) {
 			uint32_t delta = report_count - led_report_snapshot;
 			led_report_snapshot = report_count;
-			// delta per 100ms -> rpt/s = delta * 10, map to 0-255
 			uint32_t brightness = delta * 10 * 255 / 1000;
 			if (brightness > 255) brightness = 255;
 			led_pwm_set((uint8_t)brightness);

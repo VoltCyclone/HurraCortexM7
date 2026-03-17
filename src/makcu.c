@@ -1,7 +1,9 @@
-// Makcu binary protocol command handler
-// Frame: [0x50] [cmd] [len_lo] [len_hi] [payload...]
-// Response: [0x50] [cmd] [len_lo] [len_hi] [status/payload...]
-// Handles mouse, keyboard, and system commands.
+// MAKCU text protocol parser (matches makcu-rs wire format)
+// Wire: km.move(dx,dy)\r\n  km.left(1)\r\n  km.wheel(d)\r\n
+// Tracked commands: km.move(dx,dy)#42\r\n → respond with >>> OK#42\r\n
+// Button names: left, right, middle, ms1, ms2
+// Lock commands: km.lock_mx(1), km.lock_ml(1), etc. (acknowledged, no action)
+// System: km.buttons(1), km.serial('x'), km.version()
 
 #include "makcu.h"
 #include <string.h>
@@ -16,266 +18,183 @@
 // Persistent button state
 static uint8_t g_buttons;
 
-// Persistent keyboard state
-static uint8_t g_kb_modifier;
-static uint8_t g_kb_keys[6];
+// ---- Helpers ----
 
-static uint8_t button_to_mask(uint8_t button)
+static bool parse_int(const char **p, int32_t *out)
 {
-	switch (button) {
-	case 1: return BTN_LEFT;
-	case 2: return BTN_RIGHT;
-	case 3: return BTN_MIDDLE;
-	case 4: return BTN_BACK;
-	case 5: return BTN_FORWARD;
-	default: return 0;
+	while (**p == ' ' || **p == '\t') (*p)++;
+	if (**p == '\0' || **p == ')') return false;
+
+	bool neg = false;
+	if (**p == '-') { neg = true; (*p)++; }
+	else if (**p == '+') { (*p)++; }
+
+	if (**p < '0' || **p > '9') return false;
+
+	int32_t val = 0;
+	while (**p >= '0' && **p <= '9') {
+		val = val * 10 + (**p - '0');
+		(*p)++;
 	}
+	*out = neg ? -val : val;
+	return true;
 }
 
-// Build a setter-OK response: [0x50][cmd][0x01][0x00][0x00]
-static void set_ok_response(makcu_result_t *out, uint8_t cmd)
+static void skip_sep(const char **p)
 {
-	out->needs_response = true;
-	out->resp_cmd = cmd;
-	out->resp_payload[0] = 0x00; // status OK
-	out->resp_payload_len = 1;
+	while (**p == ' ' || **p == '\t' || **p == ',') (*p)++;
 }
+
+static bool starts_with(const char *s, const char *prefix)
+{
+	while (*prefix) {
+		if (*s++ != *prefix++) return false;
+	}
+	return true;
+}
+
+static void skip_open(const char **p)
+{
+	if (**p == '(') (*p)++;
+	while (**p == ' ' || **p == '\t') (*p)++;
+}
+
+// Extract tracked command ID from line. Scans for )#<number> pattern.
+// Returns 0 if untracked. Writes the position of '#' to hash_pos if found.
+static uint32_t extract_track_id(const char *line, uint8_t len)
+{
+	// Scan backwards for '#'
+	for (int i = len - 1; i >= 0; i--) {
+		if (line[i] == '#') {
+			const char *p = &line[i + 1];
+			uint32_t id = 0;
+			bool found_digit = false;
+			while (*p >= '0' && *p <= '9') {
+				id = id * 10 + (*p - '0');
+				found_digit = true;
+				p++;
+			}
+			if (found_digit) return id;
+		}
+	}
+	return 0;
+}
+
+// ---- Public API ----
 
 void makcu_init(void)
 {
 	g_buttons = 0;
-	g_kb_modifier = 0;
-	memset(g_kb_keys, 0, sizeof(g_kb_keys));
 }
 
-bool makcu_parse_command(uint8_t cmd, const uint8_t *payload, uint16_t len,
-                         makcu_result_t *out)
+bool makcu_parse_line(const char *line, uint8_t len, makcu_result_t *out)
 {
 	memset(out, 0, sizeof(*out));
 
-	switch (cmd) {
+	if (len < 4 || !starts_with(line, "km.")) return false;
+	const char *p = line + 3;
 
-	// ---- Mouse commands ----
+	// Extract tracking ID before parsing command
+	out->track_id = extract_track_id(line, len);
 
-	case MAKCU_CMD_MOVE:
-		// [dx:i16, dy:i16, segments:u8?, cx1:i8?, cy1:i8?, cx2:i8?, cy2:i8?]
-		if (len < 4) return false;
-		out->mouse_dx = (int16_t)(payload[0] | (payload[1] << 8));
-		out->mouse_dy = (int16_t)(payload[2] | (payload[3] << 8));
+	// km.move(dx, dy)
+	if (starts_with(p, "move(") || starts_with(p, "move ")) {
+		p += 4;
+		skip_open(&p);
+		int32_t x, y;
+		if (!parse_int(&p, &x)) return false;
+		skip_sep(&p);
+		if (!parse_int(&p, &y)) return false;
+
+		out->mouse_dx = (int16_t)x;
+		out->mouse_dy = (int16_t)y;
 		out->mouse_buttons = g_buttons;
 		out->has_mouse = true;
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_MO:
-		// [buttons:u8, x:i16, y:i16, wheel:i8, pan:i8, tilt:i8]
-		if (len < 6) return false;
-		g_buttons = payload[0];
-		out->mouse_buttons = g_buttons;
-		out->mouse_dx = (int16_t)(payload[1] | (payload[2] << 8));
-		out->mouse_dy = (int16_t)(payload[3] | (payload[4] << 8));
-		out->mouse_wheel = (int8_t)payload[5];
-		out->has_mouse = true;
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_LEFT_BUTTON:
-	case MAKCU_CMD_RIGHT_BUTTON:
-	case MAKCU_CMD_MIDDLE_BUTTON:
-	case MAKCU_CMD_SIDE1_BUTTON:
-	case MAKCU_CMD_SIDE2_BUTTON: {
-		if (len < 1) return false;
-		uint8_t state = payload[0];
-		uint8_t bnum = 0;
-		switch (cmd) {
-		case MAKCU_CMD_LEFT_BUTTON:   bnum = 1; break;
-		case MAKCU_CMD_RIGHT_BUTTON:  bnum = 2; break;
-		case MAKCU_CMD_MIDDLE_BUTTON: bnum = 3; break;
-		case MAKCU_CMD_SIDE1_BUTTON:  bnum = 4; break;
-		case MAKCU_CMD_SIDE2_BUTTON:  bnum = 5; break;
-		}
-		uint8_t mask = button_to_mask(bnum);
-		if (!mask) return false;
-		if (state == 1)
-			g_buttons |= mask;
-		else
-			g_buttons &= ~mask;
-		out->mouse_buttons = g_buttons;
-		out->has_mouse = true;
-		set_ok_response(out, cmd);
+		out->needs_response = true;
 		return true;
 	}
 
-	case MAKCU_CMD_WHEEL:
-		if (len < 1) return false;
-		out->mouse_wheel = (int8_t)payload[0];
+	// km.wheel(delta)
+	if (starts_with(p, "wheel(") || starts_with(p, "wheel ")) {
+		p += 5;
+		skip_open(&p);
+		int32_t w;
+		if (!parse_int(&p, &w)) return false;
+
+		out->mouse_wheel = (int8_t)w;
 		out->mouse_buttons = g_buttons;
 		out->has_mouse = true;
-		set_ok_response(out, cmd);
+		out->needs_response = true;
 		return true;
+	}
 
-	case MAKCU_CMD_CLICK:
-		// [button:u8, count:u8?, delay_ms:u8?]
-		// Press button, then signal caller to schedule release
-		if (len < 1) return false;
-		{
-			uint8_t mask = button_to_mask(payload[0]);
-			if (!mask) return false;
-			g_buttons |= mask;
+	// Button commands: km.left(state), km.right(state), km.middle(state),
+	//                  km.ms1(state), km.ms2(state)
+	// No-arg form: km.left() = click (press + auto-release)
+	struct { const char *name; uint8_t nlen; uint8_t mask; } btns[] = {
+		{ "left",   4, BTN_LEFT },
+		{ "right",  5, BTN_RIGHT },
+		{ "middle", 6, BTN_MIDDLE },
+		{ "ms1",    3, BTN_BACK },
+		{ "ms2",    3, BTN_FORWARD },
+	};
+
+	for (uint8_t i = 0; i < 5; i++) {
+		if (starts_with(p, btns[i].name) &&
+		    (p[btns[i].nlen] == '(' || p[btns[i].nlen] == ' ')) {
+			p += btns[i].nlen;
+			skip_open(&p);
+
+			// Check for no-arg click: km.left() or km.left()#id
+			if (*p == ')' || *p == '#' || *p == '\0') {
+				// Click: press + schedule release
+				g_buttons |= btns[i].mask;
+				out->mouse_buttons = g_buttons;
+				out->has_mouse = true;
+				out->click_release = true;
+				out->needs_response = true;
+				return true;
+			}
+
+			int32_t st;
+			if (!parse_int(&p, &st)) return false;
+
+			if (st != 0)
+				g_buttons |= btns[i].mask;
+			else
+				g_buttons &= ~btns[i].mask;
+
 			out->mouse_buttons = g_buttons;
 			out->has_mouse = true;
-			out->click_release = true; // caller must release after sending press
-		}
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_KB_DOWN:
-		// [key:u8]
-		if (len < 1) return false;
-		{
-			uint8_t key = payload[0];
-			for (int i = 0; i < 6; i++) {
-				if (g_kb_keys[i] == key) break; // already pressed
-				if (g_kb_keys[i] == 0) {
-					g_kb_keys[i] = key;
-					break;
-				}
-			}
-			out->kb_modifier = g_kb_modifier;
-			memcpy(out->kb_keys, g_kb_keys, 6);
-			out->has_keyboard = true;
-		}
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_KB_UP:
-		// [key:u8]
-		if (len < 1) return false;
-		{
-			uint8_t key = payload[0];
-			for (int i = 0; i < 6; i++) {
-				if (g_kb_keys[i] == key) {
-					g_kb_keys[i] = 0;
-					break;
-				}
-			}
-			out->kb_modifier = g_kb_modifier;
-			memcpy(out->kb_keys, g_kb_keys, 6);
-			out->has_keyboard = true;
-		}
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_KB_PRESS:
-		if (len < 1) return false;
-		{
-			uint8_t key = payload[0];
-			for (int i = 0; i < 6; i++) {
-				if (g_kb_keys[i] == key) break;
-				if (g_kb_keys[i] == 0) {
-					g_kb_keys[i] = key;
-					break;
-				}
-			}
-			out->kb_modifier = g_kb_modifier;
-			memcpy(out->kb_keys, g_kb_keys, 6);
-			out->has_keyboard = true;
-			out->kb_click_release = true;
-			out->kb_release_key = key;
-		}
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_KB_INIT:
-		// Clear all keyboard state
-		g_kb_modifier = 0;
-		memset(g_kb_keys, 0, sizeof(g_kb_keys));
-		out->kb_modifier = 0;
-		memset(out->kb_keys, 0, 6);
-		out->has_keyboard = true;
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_KB_STREAM:
-		// [modifiers:u8, keys[14]]  — full keyboard state injection
-		if (len < 1) return false;
-		g_kb_modifier = payload[0];
-		memset(g_kb_keys, 0, sizeof(g_kb_keys));
-		// Copy up to 6 keys (boot protocol limit) from up to 14 available
-		for (int i = 0; i < 6 && (i + 1) < (int)len; i++)
-			g_kb_keys[i] = payload[i + 1];
-		out->kb_modifier = g_kb_modifier;
-		memcpy(out->kb_keys, g_kb_keys, 6);
-		out->has_keyboard = true;
-		set_ok_response(out, cmd);
-		return true;
-	case MAKCU_CMD_VERSION:
-		// Getter: return version string
-		out->needs_response = true;
-		out->resp_cmd = cmd;
-		{
-			static const uint8_t ver[] = { '3', '.', '9' };
-			memcpy(out->resp_payload, ver, sizeof(ver));
-			out->resp_payload_len = sizeof(ver);
-		}
-		return true;
-
-	case MAKCU_CMD_INFO:
-		out->needs_response = true;
-		out->resp_cmd = cmd;
-		{
-			static const uint8_t info[] = { 'i', 'm', 'x', 'r', 't' };
-			memcpy(out->resp_payload, info, sizeof(info));
-			out->resp_payload_len = sizeof(info);
-		}
-		return true;
-
-	case MAKCU_CMD_BAUD:
-		if (len == 0) {
 			out->needs_response = true;
-			out->resp_cmd = cmd;
-			out->resp_payload[0] = 0x00;
-			out->resp_payload[1] = 0xC2;
-			out->resp_payload[2] = 0x01;
-			out->resp_payload[3] = 0x00;
-			out->resp_payload_len = 4;
-		} else {
-			set_ok_response(out, cmd);
+			return true;
 		}
-		return true;
-
-	case MAKCU_CMD_REBOOT:
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_DEVICE:
-		out->needs_response = true;
-		out->resp_cmd = cmd;
-		out->resp_payload[0] = 0x01;
-		out->resp_payload_len = 1;
-		return true;
-
-	case MAKCU_CMD_ECHO:
-	case MAKCU_CMD_LOG:
-	case MAKCU_CMD_LED:
-	case MAKCU_CMD_BYPASS:
-	case MAKCU_CMD_HS:
-	case MAKCU_CMD_RELEASE:
-	case MAKCU_CMD_SCREEN:
-	case MAKCU_CMD_SERIAL:
-	case MAKCU_CMD_FAULT:
-		set_ok_response(out, cmd);
-		return true;
-
-	case MAKCU_CMD_KB_DISABLE:
-	case MAKCU_CMD_KB_ISDOWN:
-	case MAKCU_CMD_KB_MASK:
-	case MAKCU_CMD_KB_REMAP:
-	case MAKCU_CMD_KB_STRING:
-		set_ok_response(out, cmd);
-		return true;
-
-	default:
-		return false;
 	}
+
+	// km.lock_* commands — acknowledged, no action on our side
+	if (starts_with(p, "lock_")) {
+		out->needs_response = true;
+		return true;
+	}
+
+	// km.buttons(state) — enable/disable button state broadcasting
+	if (starts_with(p, "buttons(")) {
+		out->needs_response = true;
+		return true;
+	}
+
+	// km.serial('value') — set serial identifier (acknowledged)
+	if (starts_with(p, "serial(")) {
+		out->needs_response = true;
+		return true;
+	}
+
+	// km.version() — KMBox-compatible identity string
+	if (starts_with(p, "version")) {
+		out->text_response = "km.ver(V2.0.0)\r\n";
+		out->needs_response = true;
+		return true;
+	}
+
+	return false;
 }

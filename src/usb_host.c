@@ -31,6 +31,8 @@ static uint8_t     intr_buf[MAX_INTR_EPS][64]
 static bool        intr_initialized[MAX_INTR_EPS];
 static bool        intr_transfer_active[MAX_INTR_EPS];
 static uint32_t    intr_prime_time[MAX_INTR_EPS];
+static uint8_t     intr_dev_addr[MAX_INTR_EPS];
+static uint8_t     intr_ep_num[MAX_INTR_EPS];
 static uint8_t     num_intr_eps = 0;
 static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned(4096)));
 
@@ -339,6 +341,9 @@ void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
 		qtd_setup.buffer[0] = a;
 		a &= 0xFFFFF000;
 		qtd_setup.buffer[1] = a + 0x1000;
+		qtd_setup.buffer[2] = a + 0x2000;
+		qtd_setup.buffer[3] = a + 0x3000;
+		qtd_setup.buffer[4] = a + 0x4000;
 	}
 
 	if (wLength > 0 && data) {
@@ -423,6 +428,64 @@ static uint32_t intr_timeout_count[MAX_INTR_EPS];
 static uint32_t intr_error_count[MAX_INTR_EPS];
 static uint32_t intr_poll_debug_count;
 
+// Send CLEAR_FEATURE(ENDPOINT_HALT) via fire-and-forget to clear a stalled EP.
+// Uses the async schedule; caller should check usb_host_control_async_busy() first.
+static usb_setup_t clear_halt_setup __attribute__((section(".dmabuffers"), aligned(32)));
+
+static void intr_clear_halt(uint8_t index)
+{
+	if (usb_host_control_async_busy()) return; // don't clobber in-flight transfer
+	clear_halt_setup.bmRequestType = 0x02; // host-to-device, standard, endpoint
+	clear_halt_setup.bRequest = 1;         // CLEAR_FEATURE
+	clear_halt_setup.wValue = 0;           // ENDPOINT_HALT
+	clear_halt_setup.wIndex = 0x80 | intr_ep_num[index]; // IN endpoint
+	clear_halt_setup.wLength = 0;
+	usb_host_control_transfer_fire(intr_dev_addr[index], 64,
+		&clear_halt_setup, NULL);
+}
+
+// Recover a halted periodic QH: disable S-mask to prevent HC access,
+// clear halt, re-prime transfer, then restore S-mask.
+static void intr_halt_recover(uint8_t index, uint16_t len)
+{
+	ehci_qh_t *qh = &qh_intr[index];
+	uint8_t *buf = intr_buf[index];
+
+	intr_halt_count[index]++;
+
+	// Disable S-mask so HC won't touch this QH during re-prime
+	uint32_t saved_cap1 = qh->capabilities[1];
+	qh->capabilities[1] = saved_cap1 & ~0xFFu; // zero S-mask
+	asm volatile("dsb" ::: "memory");
+
+	// Clear halt and re-prime
+	uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;
+	qh->next     = QTD_TERMINATE;
+	qh->alt_next = QTD_TERMINATE;
+	qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
+		QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
+	{
+		uint32_t a = (uint32_t)buf;
+		qh->buffer[0] = a;
+		a &= 0xFFFFF000;
+		qh->buffer[1] = a + 0x1000;
+		qh->buffer[2] = a + 0x2000;
+		qh->buffer[3] = a + 0x3000;
+		qh->buffer[4] = a + 0x4000;
+	}
+	asm volatile("dsb" ::: "memory");
+
+	// Restore S-mask to re-enable periodic processing
+	qh->capabilities[1] = saved_cap1;
+	asm volatile("dsb" ::: "memory");
+
+	intr_transfer_active[index] = true;
+	intr_prime_time[index] = millis();
+
+	// Tell the device to clear its STALL condition
+	intr_clear_halt(index);
+}
+
 void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
 	uint16_t maxpkt)
 {
@@ -452,6 +515,8 @@ void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
 
 	intr_initialized[index] = true;
 	intr_transfer_active[index] = false;
+	intr_dev_addr[index] = addr;
+	intr_ep_num[index] = ep & 0x0F;
 	intr_halt_count[index] = 0;
 	intr_timeout_count[index] = 0;
 	intr_error_count[index] = 0;
@@ -466,94 +531,12 @@ void usb_host_interrupt_dump_state(void)
 {
 }
 
-int usb_host_interrupt_poll(uint8_t index, uint8_t *data, uint16_t len)
+// Internal poll: primes QH, checks completion, handles halt/error/timeout.
+// On success returns bytes transferred and sets *buf_out to the DMA buffer.
+// Returns 0 when not yet complete, -1 on error.
+__attribute__((section(".fastrun")))
+static int intr_poll_internal(uint8_t index, uint16_t len, uint8_t **buf_out)
 {
-	if (index >= MAX_INTR_EPS || !intr_initialized[index]) return -1;
-
-	ehci_qh_t *qh  = &qh_intr[index];
-	uint8_t   *buf = intr_buf[index];
-
-	if (!intr_transfer_active[index]) {
-		uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;
-
-		qh->next     = QTD_TERMINATE;
-		qh->alt_next = QTD_TERMINATE;
-		qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
-			QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-		{
-			uint32_t a = (uint32_t)buf;
-			qh->buffer[0] = a;
-			a &= 0xFFFFF000;
-			qh->buffer[1] = a + 0x1000;
-			qh->buffer[2] = a + 0x2000;
-			qh->buffer[3] = a + 0x3000;
-			qh->buffer[4] = a + 0x4000;
-		}
-		asm volatile("dsb" ::: "memory");
-
-		intr_transfer_active[index] = true;
-		intr_prime_time[index] = millis();
-		return 0;
-	}
-
-	uint32_t token = qh->token;
-
-	if (token & QTD_TOKEN_ACTIVE) {
-		if ((millis() - intr_prime_time[index]) > 100) {
-			qh->token = token & QTD_TOKEN_TOGGLE;
-			qh->next = QTD_TERMINATE;
-			asm volatile("dsb" ::: "memory");
-			intr_transfer_active[index] = false;
-			intr_timeout_count[index]++;
-			return -1;
-		}
-		return 0;
-	}
-
-	intr_transfer_active[index] = false;
-
-	if (token & QTD_TOKEN_HALTED) {
-		// Re-prime immediately instead of wasting a poll cycle
-		intr_halt_count[index]++;
-		uint32_t toggle = token & QTD_TOKEN_TOGGLE;
-		qh->next     = QTD_TERMINATE;
-		qh->alt_next = QTD_TERMINATE;
-		qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
-			QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-		{
-			uint32_t a = (uint32_t)buf;
-			qh->buffer[0] = a;
-			a &= 0xFFFFF000;
-			qh->buffer[1] = a + 0x1000;
-			qh->buffer[2] = a + 0x2000;
-			qh->buffer[3] = a + 0x3000;
-			qh->buffer[4] = a + 0x4000;
-		}
-		asm volatile("dsb" ::: "memory");
-		intr_transfer_active[index] = true;
-		intr_prime_time[index] = millis();
-		return 0;
-	}
-
-	if (token & (QTD_TOKEN_BUFERR | QTD_TOKEN_BABBLE | QTD_TOKEN_XACTERR)) {
-		intr_error_count[index]++;
-		qh->token = token & QTD_TOKEN_TOGGLE;
-		qh->next = QTD_TERMINATE;
-		asm volatile("dsb" ::: "memory");
-		return -1;
-	}
-	uint32_t remaining = (token >> 16) & 0x7FFF;
-	uint32_t transferred = len - remaining;
-	if (transferred > 0) {
-		memcpy(data, buf, transferred);
-	}
-	return (int)transferred;
-}
-
-int usb_host_interrupt_poll_zerocopy(uint8_t index, uint8_t **data_ptr, uint16_t len)
-{
-	if (index >= MAX_INTR_EPS || !intr_initialized[index]) return -1;
-
 	ehci_qh_t *qh  = &qh_intr[index];
 	uint8_t   *buf = intr_buf[index];
 
@@ -595,25 +578,7 @@ int usb_host_interrupt_poll_zerocopy(uint8_t index, uint8_t **data_ptr, uint16_t
 	intr_transfer_active[index] = false;
 
 	if (token & QTD_TOKEN_HALTED) {
-		// Re-prime immediately instead of wasting a poll cycle
-		intr_halt_count[index]++;
-		uint32_t toggle = token & QTD_TOKEN_TOGGLE;
-		qh->next     = QTD_TERMINATE;
-		qh->alt_next = QTD_TERMINATE;
-		qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
-			QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-		{
-			uint32_t a = (uint32_t)buf;
-			qh->buffer[0] = a;
-			a &= 0xFFFFF000;
-			qh->buffer[1] = a + 0x1000;
-			qh->buffer[2] = a + 0x2000;
-			qh->buffer[3] = a + 0x3000;
-			qh->buffer[4] = a + 0x4000;
-		}
-		asm volatile("dsb" ::: "memory");
-		intr_transfer_active[index] = true;
-		intr_prime_time[index] = millis();
+		intr_halt_recover(index, len);
 		return 0;
 	}
 
@@ -628,6 +593,23 @@ int usb_host_interrupt_poll_zerocopy(uint8_t index, uint8_t **data_ptr, uint16_t
 	uint32_t remaining = (token >> 16) & 0x7FFF;
 	uint32_t transferred = len - remaining;
 	if (transferred > 0)
-		*data_ptr = buf; // return pointer directly into DMA buffer
+		*buf_out = buf;
 	return (int)transferred;
+}
+
+int usb_host_interrupt_poll(uint8_t index, uint8_t *data, uint16_t len)
+{
+	if (index >= MAX_INTR_EPS || !intr_initialized[index]) return -1;
+	uint8_t *buf_ptr = NULL;
+	int ret = intr_poll_internal(index, len, &buf_ptr);
+	if (ret > 0 && buf_ptr)
+		memcpy(data, buf_ptr, ret);
+	return ret;
+}
+
+__attribute__((section(".fastrun")))
+int usb_host_interrupt_poll_zerocopy(uint8_t index, uint8_t **data_ptr, uint16_t len)
+{
+	if (index >= MAX_INTR_EPS || !intr_initialized[index]) return -1;
+	return intr_poll_internal(index, len, data_ptr);
 }

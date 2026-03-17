@@ -71,7 +71,7 @@ esac
 # ── Command Input ────────────────────────────────────────────────────────
 # LPUART6 (pins 0/1) — command UART to host bridge.
 NET=0
-CMD_BAUD=4000000
+CMD_BAUD=115200
 
 cmd_choice=$(prompt_choice "Command input:" \
     "Serial (pins 0/1, LPUART6)" \
@@ -79,19 +79,19 @@ cmd_choice=$(prompt_choice "Command input:" \
 
 case "$cmd_choice" in
     1)
-        cmd_baud_choice=$(prompt_choice "Command UART baud rate:" \
-            "4000000" \
-            "2000000" \
+        cmd_baud_choice=$(prompt_choice "Command UART baud rate (CP2102 max 921600):" \
+            "115200" \
+            "460800" \
             "921600" \
             "Custom")
         case "$cmd_baud_choice" in
-            1) CMD_BAUD=4000000 ;;
-            2) CMD_BAUD=2000000 ;;
+            1) CMD_BAUD=115200 ;;
+            2) CMD_BAUD=460800 ;;
             3) CMD_BAUD=921600 ;;
             4)
                 printf "${BOLD}  Baud rate> ${RESET}"
                 read -r CMD_BAUD
-                CMD_BAUD=${CMD_BAUD:-4000000}
+                CMD_BAUD=${CMD_BAUD:-115200}
                 ;;
         esac
         ;;
@@ -105,6 +105,30 @@ case "$cmd_choice" in
         ;;
 esac
 
+# ── Bluetooth ────────────────────────────────────────────────────────────
+# HC-05 on LPUART7 (D28/D29), STA on D30
+BT=0
+BT_BAUD=115200
+
+if prompt_yn "HC-05 Bluetooth input (D28/D29)?" "n"; then
+    BT=1
+    bt_baud_choice=$(prompt_choice "HC-05 baud rate (AT-configured at boot):" \
+        "921600" \
+        "460800" \
+        "115200" \
+        "Custom")
+    case "$bt_baud_choice" in
+        1) BT_BAUD=921600 ;;
+        2) BT_BAUD=460800 ;;
+        3) BT_BAUD=115200 ;;
+        4)
+            printf "${BOLD}  BT baud rate> ${RESET}"
+            read -r BT_BAUD
+            BT_BAUD=${BT_BAUD:-115200}
+            ;;
+    esac
+fi
+
 # ── Build Options ───────────────────────────────────────────────────────────
 CLEAN=false
 if prompt_yn "Clean before build?" "n"; then
@@ -117,9 +141,6 @@ if prompt_yn "Flash after build?" "n"; then
 fi
 
 BUILD_BRIDGE=false
-if prompt_yn "Build UART bridge (RP2350)?" "n"; then
-    BUILD_BRIDGE=true
-fi
 
 PARALLEL=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 
@@ -144,6 +165,12 @@ else
     printf "  │  Cmd input:  ${GREEN}%-25s${RESET} │\n" "LPUART6 @ ${CMD_BAUD}"
 fi
 
+if [[ "$BT" -eq 1 ]]; then
+    printf "  │  Bluetooth:  ${GREEN}%-25s${RESET} │\n" "HC-05 @ ${BT_BAUD}"
+else
+    printf "  │  Bluetooth:  ${DIM}%-25s${RESET} │\n" "Disabled"
+fi
+
 $CLEAN && cl="Yes" || cl="No"
 $FLASH && fl="Yes" || fl="No"
 $BUILD_BRIDGE && br="Yes" || br="No"
@@ -165,6 +192,8 @@ MAKE_ARGS=(
     "TFT=${TFT}"
     "NET=${NET}"
     "CMD_BAUD=${CMD_BAUD}"
+    "BT=${BT}"
+    "BT_BAUD=${BT_BAUD}"
     "-j${PARALLEL}"
 )
 

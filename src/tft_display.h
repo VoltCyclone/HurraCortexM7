@@ -36,8 +36,9 @@ typedef struct {
 	uint32_t uart_framing;     // FE: baud mismatch or signal integrity
 	uint32_t uart_noise;       // NF: electrical noise on line
 
-	// UART / KMBox RX
+	// UART / KMBox RX/TX
 	uint32_t uart_rx_bytes;    // total bytes received on LPUART6 (DMA ring)
+	uint32_t uart_tx_bytes;    // total bytes sent via LPUART6 TX DMA
 
 #if NET_ENABLED
 	// Network (KMBox Net over Ethernet)
@@ -48,6 +49,15 @@ typedef struct {
 	uint32_t net_uuid;         // Device UUID (8 hex chars)
 	uint32_t net_rx_count;     // UDP packets received
 	uint32_t net_tx_count;     // UDP packets sent
+#endif
+
+#if BT_ENABLED
+	// Bluetooth (HC-05 SPP over LPUART7)
+	bool     bt_connected;     // STA pin high = paired
+	uint32_t bt_baud;          // Active baud rate after AT config
+	uint32_t bt_frames_ok;     // Parsed command frames
+	uint32_t bt_frames_err;    // Checksum/length errors
+	uint32_t bt_rx_bytes;      // Total bytes received
 #endif
 
 	// System

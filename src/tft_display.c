@@ -98,6 +98,12 @@ static void draw_stats(const tft_proxy_stats_t *s)
 	tft_draw_string(COL(13), LINE(2),
 		s->device_configured ? COL_GREEN : COL_RED,
 		s->device_configured ? "OK" : "--");
+#if BT_ENABLED
+	tft_draw_string(COL(16), LINE(2), COL_GRAY, "BT:");
+	tft_draw_string(COL(19), LINE(2),
+		s->bt_connected ? COL_GREEN : COL_RED,
+		s->bt_connected ? "OK" : "--");
+#endif
 
 	{
 		const char *proto[] = { "None", "KMBox", "Makcu", "Ferrum" };
@@ -254,24 +260,67 @@ static void draw_stats(const tft_proxy_stats_t *s)
 
 	draw_separator(LINE(18));
 #else
-	// Line 14: UART RX activity
-	tft_draw_string(COL(0), LINE(14), COL_GRAY, "UART RX:");
+	// Line 14: UART RX/TX activity
+	tft_draw_string(COL(0), LINE(14), COL_GRAY, "RX:");
 	if (s->uart_rx_bytes > 0) {
 		p = buf;
 		p = u32_to_str(p, s->uart_rx_bytes);
 		*p++ = 'B';
 		fmt_done(buf, p);
-		tft_draw_string(COL(9), LINE(14), COL_GREEN, buf);
+		tft_draw_string(COL(3), LINE(14), COL_GREEN, buf);
 	} else {
-		tft_draw_string(COL(9), LINE(14), COL_RED, "no data");
+		tft_draw_string(COL(3), LINE(14), COL_RED, "no data");
+	}
+	tft_draw_string(COL(11), LINE(14), COL_GRAY, "TX:");
+	if (s->uart_tx_bytes > 0) {
+		p = buf;
+		p = u32_to_str(p, s->uart_tx_bytes);
+		*p++ = 'B';
+		fmt_done(buf, p);
+		tft_draw_string(COL(14), LINE(14), COL_GREEN, buf);
+	} else {
+		tft_draw_string(COL(14), LINE(14), COL_RED, "0");
 	}
 
+#if BT_ENABLED
+	tft_draw_string(COL(12), LINE(14), COL_GRAY, "BT:");
+	tft_draw_string(COL(15), LINE(14),
+		s->bt_connected ? COL_GREEN : COL_DARK,
+		s->bt_connected ? "CONN" : "----");
+
+	// Line 15: BT baud + frame stats
+	tft_draw_string(COL(0), LINE(15), COL_GRAY, "BT:");
+	p = buf;
+	p = u32_to_str(p, s->bt_baud);
+	fmt_done(buf, p);
+	tft_draw_string(COL(3), LINE(15), COL_CYAN, buf);
+
+	p = buf;
+	p = u32_to_str(p, s->bt_frames_ok);
+	*p++ = 'f';
+	fmt_done(buf, p);
+	tft_draw_string(COL(12), LINE(15), COL_WHITE, buf);
+
+	// Line 16: BT errors (if any)
+	if (s->bt_frames_err > 0) {
+		tft_draw_string(COL(0), LINE(16), COL_GRAY, "BT E:");
+		p = buf;
+		p = u32_to_str(p, s->bt_frames_err);
+		fmt_done(buf, p);
+		tft_draw_string(COL(5), LINE(16), COL_RED, buf);
+	}
+
+	draw_separator(LINE(17));
+#else
 	draw_separator(LINE(15));
 #endif
+#endif
 
-	// Line offsets depend on whether NET stats took extra rows
+	// Line offsets depend on whether NET/BT stats took extra rows
 #if NET_ENABLED
 #define UPTIME_LINE  19
+#elif BT_ENABLED
+#define UPTIME_LINE  18
 #else
 #define UPTIME_LINE  16
 #endif
@@ -302,27 +351,32 @@ static void draw_stats(const tft_proxy_stats_t *s)
 	}
 
 #if !NET_ENABLED
-	draw_separator(LINE(17));
+	draw_separator(LINE(UPTIME_LINE + 1));
 
 	{
-		tft_draw_string(COL(0), LINE(18), COL_GRAY, "USB:");
+		tft_draw_string(COL(0), LINE(UPTIME_LINE + 2), COL_GRAY, "USB:");
 		p = buf;
 		p = u16_to_hex4(p, s->usb_vid);
 		*p++ = ':';
 		p = u16_to_hex4(p, s->usb_pid);
 		fmt_done(buf, p);
-		tft_draw_string(COL(4), LINE(18), COL_WHITE, buf);
+		tft_draw_string(COL(4), LINE(UPTIME_LINE + 2), COL_WHITE, buf);
 	}
 
 	if (s->usb_product[0]) {
-		tft_draw_string(COL(0), LINE(19), COL_DARK, s->usb_product);
+		tft_draw_string(COL(0), LINE(UPTIME_LINE + 3), COL_DARK, s->usb_product);
 	}
 #endif
 
-#undef UPTIME_LINE
+	// Compute graph start line based on where preceding content ends
+#if NET_ENABLED
+#define GRAPH_LINE  (UPTIME_LINE + 1)
+#else
+#define GRAPH_LINE  (UPTIME_LINE + 4)
+#endif
 
 	if (tft_detected_driver == TFT_DRIVER_ILI9341) {
-		// ---- Throughput history graph (lines 20-35) ----
+		// ---- Throughput history graph ----
 		// Sample rate into ring buffer every ~1s (30 frames at 30Hz)
 		g_graph_tick++;
 		if (g_graph_tick >= 30) {
@@ -333,15 +387,15 @@ static void draw_stats(const tft_proxy_stats_t *s)
 				g_peak_rate = s->reports_per_sec;
 		}
 
-		draw_separator(LINE(20));
+		draw_separator(LINE(GRAPH_LINE));
 
 		// Section title + peak rate
-		tft_draw_string(COL(1), LINE(21), COL_CYAN, "THROUGHPUT");
+		tft_draw_string(COL(1), LINE(GRAPH_LINE + 1), COL_CYAN, "THROUGHPUT");
 		p = buf;
 		*p++ = 'p'; *p++ = 'k'; *p++ = ' ';
 		p = u32_to_str(p, g_peak_rate);
 		fmt_done(buf, p);
-		tft_draw_string_right(TFT_WIDTH - COL(1), LINE(21), COL_DIM, buf);
+		tft_draw_string_right(TFT_WIDTH - COL(1), LINE(GRAPH_LINE + 1), COL_DIM, buf);
 
 		// Auto-scale Y axis
 		uint32_t mx = 10;
@@ -352,10 +406,11 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		else
 			mx = ((mx + 99) / 100) * 100;
 
-		// Graph bounds
+		// Graph bounds — top flexes with GRAPH_LINE, bottom fixed to
+		// leave room for time hint + "Tap for Setup"
 		int gx0 = COL(5);
 		int gx1 = TFT_WIDTH - COL(1);
-		int gy0 = LINE(23);
+		int gy0 = LINE(GRAPH_LINE + 3);
 		int gy1 = LINE(34);
 		int gh  = gy1 - gy0;
 
@@ -405,6 +460,8 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		int settings_col = (TFT_COLS - 14) / 2;
 		tft_draw_string(COL(settings_col), LINE(38), COL_DIM, "Tap for Setup");
 	}
+#undef GRAPH_LINE
+#undef UPTIME_LINE
 }
 
 typedef struct {

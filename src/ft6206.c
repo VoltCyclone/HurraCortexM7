@@ -64,54 +64,69 @@ static void i2c_wait_stop(void)
 	LPI2C1_MSR = LPI2C_MSR_SDF;
 }
 
-static bool i2c_write_reg(uint8_t reg, uint8_t val)
+// Reset LPI2C to a clean state — flush FIFOs, clear flags, force STOP.
+// Called before each transaction and on error to prevent bus lockup.
+static void i2c_reset(void)
 {
-	// Clear any pending errors/flags
+	LPI2C1_MCR |= LPI2C_MCR_RTF | LPI2C_MCR_RRF;
 	LPI2C1_MSR = LPI2C_MSR_NDF | LPI2C_MSR_ALF | LPI2C_MSR_FEF |
 	             LPI2C_MSR_SDF | LPI2C_MSR_EPF;
+	// If bus is busy, force a STOP to release it
+	if (LPI2C1_MSR & LPI2C_MSR_MBF) {
+		LPI2C1_MTDR = LPI2C_MTDR_CMD_STOP;
+		i2c_wait_stop();
+	}
+}
 
-	// START + address (write)
-	if (!i2c_wait_tx()) return false;
+static bool i2c_write_reg(uint8_t reg, uint8_t val)
+{
+	i2c_reset();
+
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_START | LPI2C_MTDR_DATA(FT_ADDR << 1);
 
-	// Register address
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_TRANSMIT | LPI2C_MTDR_DATA(reg);
 
-	// Data byte
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_TRANSMIT | LPI2C_MTDR_DATA(val);
 
-	// STOP
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_STOP;
 
 	i2c_wait_stop();
 	return true;
+
+fail:
+	i2c_reset();
+	return false;
 }
 
 static bool i2c_read_regs(uint8_t reg, uint8_t *buf, uint8_t len)
 {
+	i2c_reset();
 
-	LPI2C1_MSR = LPI2C_MSR_NDF | LPI2C_MSR_ALF | LPI2C_MSR_FEF |
-	             LPI2C_MSR_SDF | LPI2C_MSR_EPF;
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_START | LPI2C_MTDR_DATA(FT_ADDR << 1);
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_TRANSMIT | LPI2C_MTDR_DATA(reg);
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_START | LPI2C_MTDR_DATA((FT_ADDR << 1) | 1);
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_RECEIVE | LPI2C_MTDR_DATA(len - 1);
 	for (uint8_t i = 0; i < len; i++) {
-		if (!i2c_wait_rx()) return false;
+		if (!i2c_wait_rx()) goto fail;
 		buf[i] = (uint8_t)(LPI2C1_MRDR & 0xFF);
 	}
-	if (!i2c_wait_tx()) return false;
+	if (!i2c_wait_tx()) goto fail;
 	LPI2C1_MTDR = LPI2C_MTDR_CMD_STOP;
 
 	i2c_wait_stop();
 	return true;
+
+fail:
+	i2c_reset();
+	return false;
 }
 // Bit-bang SCL to recover a stuck I2C bus (SDA held low by slave).
 // Muxes pin 19 as GPIO output, toggles SCL up to 16 times, then restores.
@@ -142,8 +157,8 @@ bool ft6206_init(void)
 	// Recover bus before muxing to LPI2C — clears stuck SDA
 	i2c_bus_recover();
 
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_00 = 3; // ALT3 = LPI2C1_SCL
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_01 = 3; // ALT3 = LPI2C1_SDA
+	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_00 = 3 | 0x10; // ALT3 + SION = LPI2C1_SCL
+	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_01 = 3 | 0x10; // ALT3 + SION = LPI2C1_SDA
 	// I2C pads: open-drain mandatory, slow slew prevents ringing
 	uint32_t i2c_pad = IOMUXC_PAD_ODE | IOMUXC_PAD_PKE | IOMUXC_PAD_PUE |
 	                   IOMUXC_PAD_PUS(3) | IOMUXC_PAD_HYS |
@@ -155,9 +170,10 @@ bool ft6206_init(void)
 	LPI2C1_MCR = LPI2C_MCR_RST;
 	LPI2C1_MCR = 0;
 
-	// Fast Mode ~400 kHz on 24 MHz LPI2C clock
-	LPI2C1_MCCR0 = LPI2C_MCCR0_CLKHI(14) | LPI2C_MCCR0_CLKLO(28) |
-	               LPI2C_MCCR0_SETHOLD(8) | LPI2C_MCCR0_DATAVD(4);
+	// Fast Mode 400 kHz on 24 MHz LPI2C clock
+	// tHI = 21/24 = 0.875 µs (min 0.6), tLO = 39/24 = 1.625 µs (min 1.3)
+	LPI2C1_MCCR0 = LPI2C_MCCR0_CLKHI(20) | LPI2C_MCCR0_CLKLO(38) |
+	               LPI2C_MCCR0_SETHOLD(16) | LPI2C_MCCR0_DATAVD(8);
 	LPI2C1_MCFGR1 = LPI2C_MCFGR1_PRESCALE(0);
 
 	// Glitch filters: 2 cycles on SCL and SDA (removes <84 ns spikes)
@@ -214,7 +230,9 @@ touch_point_t ft6206_read(void)
 
 	uint16_t raw_x = ((uint16_t)(buf[1] & 0x0F) << 8) | buf[2];
 	uint16_t raw_y = ((uint16_t)(buf[3] & 0x0F) << 8) | buf[4];
-	pt.x = raw_x;
+	// MADCTL=0x48 has MX=1 (column order reversed), so invert X only.
+	// FT6206 Y already matches display top-to-bottom.
+	pt.x = (raw_x < 240) ? (239 - raw_x) : 0;
 	pt.y = raw_y;
 	pt.valid = true;
 	return pt;

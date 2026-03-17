@@ -12,11 +12,17 @@ TFT ?= 1
 # Pass NET=1 to enable Ethernet (KMBox Net UDP protocol, replaces UART commands)
 NET ?= 0
 # Command UART baud rate — LPUART6 on Teensy pins 0/1
-CMD_BAUD ?= 4000000
+# CP2102 max: 921600.  CP2102N max: 3000000.
+CMD_BAUD ?= 115200
+# Pass BT=1 to enable HC-05 Bluetooth SPP input (LPUART7, pins D28/D29)
+BT ?= 0
+# HC-05 baud rate — AT commands configure module at boot (max practical: 921600)
+BT_BAUD ?= 921600
 
 DEFINES = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DF_CPU=816000000 \
           -DTFT_ENABLED=$(TFT) \
-          -DNET_ENABLED=$(NET) -DCMD_BAUD=$(CMD_BAUD)
+          -DNET_ENABLED=$(NET) -DCMD_BAUD=$(CMD_BAUD) \
+          -DBT_ENABLED=$(BT) -DBT_BAUD=$(BT_BAUD)
 
 CFLAGS = $(MCU_FLAGS) $(DEFINES) \
          -Os -Wall -Wno-unused-variable \
@@ -33,13 +39,14 @@ SRC      = src/main.c src/usb_host.c src/usb_device.c src/desc_capture.c \
            src/kmbox.c src/humanize.c src/smooth.c src/ferrum.c src/makcu.c \
            src/tft.c src/tft_display.c src/st7735.c src/ili9341.c src/ft6206.c \
            src/font6x8.c \
-           src/enet.c src/udp.c src/kmnet.c
+           src/enet.c src/udp.c src/kmnet.c \
+           src/bt.c
 
 OBJ = $(CORE_SRC:.c=.o) $(SRC:.c=.o)
 
 BRIDGE_BUILD = uart_bridge/build
 
-all: $(TARGET).hex bridge
+all: $(TARGET).hex
 	@$(SIZE) $(TARGET).elf
 
 $(TARGET).elf: $(OBJ)

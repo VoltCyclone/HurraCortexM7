@@ -390,17 +390,12 @@ static int ep0_rx_data(uint16_t max_len)
 	}
 }
 
-// Forward a control request to the real USB device and relay the response.
-// IN requests block briefly (rare — vendor IN only, GET_REPORT handled locally).
-// OUT requests are deferred: ACK the computer immediately, forward next poll cycle.
 static void handle_passthrough(const usb_setup_t *setup)
 {
 	bool is_in = (setup->bmRequestType & 0x80) != 0;
 	uint16_t wLength = setup->wLength;
 
 	if (is_in) {
-		// Device-to-host: forward to real device, return response.
-		// Wait for any in-flight fire-and-forget to finish first, but bound wait time.
 		uint32_t start = millis();
 		while (usb_host_control_async_busy()) {
 			if ((millis() - start) > 200) {
@@ -423,17 +418,14 @@ static void handle_passthrough(const usb_setup_t *setup)
 			return;
 		}
 		ep0_tx_data(NULL, 0); // ACK computer now — don't block
-		// Queue for forwarding in next poll cycle
 		if (rxd <= (int)sizeof(deferred_out.data)) {
 			memcpy(&deferred_out.setup, setup, sizeof(*setup));
 			memcpy(deferred_out.data, ep0_rx_buf, rxd);
 			deferred_out.data_len = (uint16_t)rxd;
-			// Ensure forwarded setup uses the actual received length
 			deferred_out.setup.wLength = deferred_out.data_len;
 			deferred_out.pending = true;
 		}
 	} else {
-		// No data phase: ACK immediately, defer forward
 		ep0_tx_data(NULL, 0);
 		memcpy(&deferred_out.setup, setup, sizeof(*setup));
 		deferred_out.data_len = 0;
@@ -467,7 +459,6 @@ static void handle_setup_packet(void)
 	} else if (req_type == 0x20) {
 		handle_class_request(&setup);
 	} else {
-		// Vendor and other request types: pass through to real device
 		handle_passthrough(&setup);
 	}
 }
@@ -502,8 +493,6 @@ bool usb_device_init(const captured_descriptors_t *desc)
 	memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
 	memset(pending_len, 0, sizeof(pending_len));
 	num_int_eps = 0;
-
-	// Match PJRC core USB bring-up power rail settings.
 	PMU_REG_3P0 = PMU_REG_3P0_OUTPUT_TRG(0x0F) |
 		PMU_REG_3P0_BO_OFFSET(6) |
 		PMU_REG_3P0_ENABLE_LINREG;
@@ -537,6 +526,7 @@ bool usb_device_init(const captured_descriptors_t *desc)
 	return true;
 }
 
+__attribute__((section(".fastrun")))
 void usb_device_poll(void)
 {
 	uint32_t status = USB1_USBSTS;
@@ -567,8 +557,6 @@ void usb_device_poll(void)
 		}
 	}
 
-	// Forward deferred passthrough requests to real device (fire-and-forget).
-	// Skip if a previous async transfer is still in flight — try again next poll.
 	if (__builtin_expect(deferred_out.pending, 0) &&
 	    !usb_host_control_async_busy()) {
 		deferred_out.pending = false;
@@ -578,6 +566,7 @@ void usb_device_poll(void)
 	}
 }
 
+__attribute__((section(".fastrun")))
 bool usb_device_send_report(uint8_t ep_num, const uint8_t *data, uint16_t len)
 {
 	if (dev_state != USB_DEV_STATE_CONFIGURED) return false;
