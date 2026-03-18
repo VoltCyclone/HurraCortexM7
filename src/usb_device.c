@@ -1,17 +1,3 @@
-// USB Device controller driver for Teensy 4.1 USB1 port
-// Replays captured descriptors and forwards HID reports.
-// Supports composite devices with multiple interrupt IN endpoints.
-//
-// USB1_USBINTR enables (UE|UEE|URE|SLE) cause the controller to assert
-// its IRQ line on bus events.  No ISR is installed — the NVIC pending
-// bit alone wakes WFE via SEVONPEND (set in main).  usb_device_poll()
-// reads and clears USB1_USBSTS, which deasserts the IRQ line and
-// clears the NVIC pending bit (level-sensitive).
-//
-// DMA buffers are in a non-cacheable MPU region (.dmabuffers at 0x20200000).
-// No manual cache maintenance needed — bare DSBs drain the write buffer
-// before the USB controller is told to read DMA structures.
-
 #include <string.h>
 #include "imxrt.h"
 #include "usb_device.h"
@@ -41,8 +27,6 @@ static uint8_t ep_busy_mask;     // bit set = EP has active DMA transfer in flig
 static uint8_t active_bank_mask; // bit set = EP using bank 1, clear = bank 0
 static uint8_t pending_len[USB_DEV_NUM_ENDPOINTS];  // 0 = no pending report staged
 
-// Deferred passthrough: SET_REPORT data queued for async forwarding to real device.
-// Avoids blocking the setup handler (and stalling interrupt EP polling).
 static struct {
 	usb_setup_t setup;
 	uint8_t     data[64];
@@ -95,13 +79,9 @@ static void ep0_tx_data(const uint8_t *data, uint16_t len)
 	dqh_list[1].token = 0;
 	asm volatile("dsb" ::: "memory");
 
-	USB1_ENDPTPRIME = (1 << 16); // Prime EP0 TX
+	USB1_ENDPTPRIME = (1 << 16);
 
-	// For IN data transfers (len > 0), the host follows up with a
-	// STATUS OUT ZLP.  We must prime EP0 RX to ACK it; otherwise the
-	// controller NAKs the status phase and the host retries for
-	// seconds before giving up — causing the slow string-descriptor
-	// appearance.
+	// Prime EP0 RX for STATUS OUT ZLP (avoids NAK → host retry stall)
 	if (len > 0) {
 		memset(&dtd_ep0_rx, 0, sizeof(dtd_ep0_rx));
 		dtd_ep0_rx.next  = DTD_TERMINATE;
@@ -111,7 +91,7 @@ static void ep0_tx_data(const uint8_t *data, uint16_t len)
 		dqh_list[0].token = 0;
 		asm volatile("dsb" ::: "memory");
 
-		USB1_ENDPTPRIME |= (1 << 0); // Prime EP0 RX
+		USB1_ENDPTPRIME |= (1 << 0);
 	}
 }
 
@@ -303,7 +283,7 @@ static void handle_standard_request(const usb_setup_t *setup)
 		break;
 	case 0x01: // CLEAR_FEATURE
 	case 0x03: // SET_FEATURE
-		ep0_tx_data(NULL, 0); // Accept silently
+		ep0_tx_data(NULL, 0);
 		break;
 	case 0x08: { // GET_CONFIGURATION
 		uint8_t cfg = (dev_state == USB_DEV_STATE_CONFIGURED)
@@ -375,7 +355,7 @@ static int ep0_rx_data(uint16_t max_len)
 	dqh_list[0].token = 0;
 	asm volatile("dsb" ::: "memory");
 
-	USB1_ENDPTPRIME = (1 << 0); // Prime EP0 RX
+	USB1_ENDPTPRIME = (1 << 0);
 
 	uint32_t start = millis();
 	while (1) {
@@ -450,7 +430,7 @@ static void handle_setup_packet(void)
 	USB1_USBCMD &= ~USB_USBCMD_SUTW;
 	USB1_ENDPTSETUPSTAT = 1;
 	while (USB1_ENDPTSETUPSTAT & 1) ;
-	USB1_ENDPTFLUSH = (1 << 16) | (1 << 0); // Flush EP0 TX and RX
+	USB1_ENDPTFLUSH = (1 << 16) | (1 << 0);
 	while (USB1_ENDPTFLUSH) ;
 	uint8_t req_type = setup.bmRequestType & 0x60;
 
@@ -530,7 +510,7 @@ __attribute__((section(".fastrun")))
 void usb_device_poll(void)
 {
 	uint32_t status = USB1_USBSTS;
-	USB1_USBSTS = status; // Write-to-clear
+	USB1_USBSTS = status;
 	if (__builtin_expect(status & USB_USBSTS_URI, 0)) {
 		handle_bus_reset();
 		deferred_out.pending = false; // discard on reset

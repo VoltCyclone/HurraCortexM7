@@ -24,6 +24,13 @@ DEFINES = -DARDUINO_TEENSY41 -D__IMXRT1062__ -DF_CPU=816000000 \
           -DNET_ENABLED=$(NET) -DCMD_BAUD=$(CMD_BAUD) \
           -DBT_ENABLED=$(BT) -DBT_BAUD=$(BT_BAUD)
 
+# Force rebuild when build flags change
+BUILD_FLAGS := TFT=$(TFT) NET=$(NET) CMD_BAUD=$(CMD_BAUD) BT=$(BT) BT_BAUD=$(BT_BAUD)
+.build_flags: FORCE
+	@echo '$(BUILD_FLAGS)' | cmp -s - $@ || echo '$(BUILD_FLAGS)' > $@
+FORCE:
+$(OBJ): .build_flags
+
 CFLAGS = $(MCU_FLAGS) $(DEFINES) \
          -Os -Wall -Wno-unused-variable \
          -ffunction-sections -fdata-sections \
@@ -36,7 +43,7 @@ LDFLAGS = $(MCU_FLAGS) \
 
 CORE_SRC = core/startup.c core/bootdata.c
 SRC      = src/main.c src/usb_host.c src/usb_device.c src/desc_capture.c \
-           src/kmbox.c src/humanize.c src/smooth.c src/ferrum.c src/makcu.c \
+           src/kmbox.c src/humanize.c src/smooth.c src/makd.c src/macku.c \
            src/tft.c src/tft_display.c src/st7735.c src/ili9341.c src/ft6206.c \
            src/font6x8.c \
            src/enet.c src/udp.c src/kmnet.c \
@@ -57,7 +64,7 @@ $(TARGET).hex: $(TARGET).elf
 
 # Hot-path sources get -O2 instead of -Os for better inlining/unrolling
 HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o src/smooth.o src/humanize.o \
-          src/enet.o src/kmnet.o
+          src/enet.o src/kmnet.o src/makd.o src/macku.o
 $(HOT_SRC): CFLAGS := $(subst -Os,-O2,$(CFLAGS)) -ffast-math
 
 %.o: %.c
@@ -76,7 +83,7 @@ flash-bridge: $(BRIDGE_BUILD)/uart_bridge.uf2
 	@echo "Copy $(BRIDGE_BUILD)/uart_bridge.uf2 to the RP2350 (mount as USB drive)"
 
 clean:
-	rm -f $(OBJ) $(TARGET).elf $(TARGET).hex
+	rm -f $(OBJ) $(TARGET).elf $(TARGET).hex .build_flags
 	rm -rf $(BRIDGE_BUILD)
 
 .PHONY: all flash flash-bridge bridge clean

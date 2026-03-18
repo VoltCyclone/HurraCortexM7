@@ -1,12 +1,8 @@
-// tft_display.c — Stats + settings rendering for USB proxy TFT display
-// Supports ST7735 (21×20 grid) and ILI9341 (40×40 grid) via runtime detection
-// Touch-driven settings menu on ILI9341 when detected
+// tft_display.c — TFT stats + settings rendering
 
 #include "tft_display.h"
 #include "tft.h"
 #include <string.h>
-
-// ---- Formatting helpers ----
 
 static char *u32_to_str(char *buf, uint32_t v)
 {
@@ -50,7 +46,6 @@ static char *i8_to_str(char *buf, int8_t v)
 	return buf;
 }
 
-// ---- Layout constants ----
 #define FW   TFT_FONT_W
 #define FH   TFT_FONT_H
 #define LINE(n)  ((n) * FH)
@@ -61,17 +56,22 @@ static void draw_separator(int y)
 	tft_draw_hline(2, TFT_WIDTH - 3, y + FH / 2, COL_DIM);
 }
 
-// ---- View/settings state ----
 static tft_view_t     g_view = TFT_VIEW_STATS;
 static tft_settings_t g_settings = {
+	.identity         = (CMD_BAUD >= 2000000) ? IDENTITY_FERRUM : IDENTITY_MACKU,
+	.baud             = CMD_BAUD,
 	.smooth_enabled   = true,
 	.smooth_max       = 127,
 	.humanize_enabled = true,
 	.backlight        = true,
 };
+
+static const uint32_t baud_presets[] = {
+	115200, 921600, 1000000, 2000000, 3000000, 4000000
+};
+#define BAUD_PRESET_COUNT (sizeof(baud_presets) / sizeof(baud_presets[0]))
 static uint8_t g_selected_setting = 0;
 
-// ---- Rate history for throughput graph (ILI9341 only) ----
 #define RATE_HIST_LEN  34
 static uint32_t g_rate_hist[RATE_HIST_LEN];
 static uint8_t  g_rate_hist_wr;
@@ -106,7 +106,7 @@ static void draw_stats(const tft_proxy_stats_t *s)
 #endif
 
 	{
-		const char *proto[] = { "None", "KMBox", "Makcu", "Ferrum" };
+		const char *proto[] = { "None", "MAKD", "MACKU", "Ferrum" };
 		uint8_t pm = s->protocol_mode;
 		if (pm > 3) pm = 0;
 		tft_draw_string(COL(0), LINE(3), COL_GRAY, "Proto:");
@@ -150,7 +150,7 @@ static void draw_stats(const tft_proxy_stats_t *s)
 	tft_draw_string(COL(6), LINE(8),
 		s->drop_count > 0 ? COL_RED : COL_DARK, buf);
 
-	tft_draw_string(COL(0), LINE(9), COL_GRAY, "KMBox:");
+	tft_draw_string(COL(0), LINE(9), COL_GRAY, "MAKD:");
 	p = buf;
 	p = u32_to_str(p, s->kmbox_frames_ok);
 	*p++ = ' '; *p++ = 'o'; *p++ = 'k';
@@ -376,7 +376,6 @@ static void draw_stats(const tft_proxy_stats_t *s)
 #endif
 
 	if (tft_detected_driver == TFT_DRIVER_ILI9341) {
-		// ---- Throughput history graph ----
 		// Sample rate into ring buffer every ~1s (30 frames at 30Hz)
 		g_graph_tick++;
 		if (g_graph_tick >= 30) {
@@ -389,7 +388,6 @@ static void draw_stats(const tft_proxy_stats_t *s)
 
 		draw_separator(LINE(GRAPH_LINE));
 
-		// Section title + peak rate
 		tft_draw_string(COL(1), LINE(GRAPH_LINE + 1), COL_CYAN, "THROUGHPUT");
 		p = buf;
 		*p++ = 'p'; *p++ = 'k'; *p++ = ' ';
@@ -397,7 +395,6 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		fmt_done(buf, p);
 		tft_draw_string_right(TFT_WIDTH - COL(1), LINE(GRAPH_LINE + 1), COL_DIM, buf);
 
-		// Auto-scale Y axis
 		uint32_t mx = 10;
 		for (int i = 0; i < RATE_HIST_LEN; i++)
 			if (g_rate_hist[i] > mx) mx = g_rate_hist[i];
@@ -406,15 +403,12 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		else
 			mx = ((mx + 99) / 100) * 100;
 
-		// Graph bounds — top flexes with GRAPH_LINE, bottom fixed to
-		// leave room for time hint + "Tap for Setup"
 		int gx0 = COL(5);
 		int gx1 = TFT_WIDTH - COL(1);
 		int gy0 = LINE(GRAPH_LINE + 3);
 		int gy1 = LINE(34);
 		int gh  = gy1 - gy0;
 
-		// Y-axis labels
 		p = buf; p = u32_to_str(p, mx); fmt_done(buf, p);
 		tft_draw_string_right(gx0 - 2, gy0, COL_DIM, buf);
 		tft_draw_string_right(gx0 - 2, gy1 - FH, COL_DIM, "0");
@@ -430,7 +424,6 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		tft_draw_rect(gx0 - 1, gy0, gx0 - 1, gy1, COL_DIM);
 		tft_draw_hline(gx0 - 1, gx1, gy1 + 1, COL_DIM);
 
-		// Draw bars (oldest left → newest right)
 		int bar_step = (gx1 - gx0) / RATE_HIST_LEN;
 		int bar_w = bar_step - 1;
 		if (bar_w < 1) bar_w = 1;
@@ -455,7 +448,6 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		tft_draw_string_right(TFT_WIDTH - COL(1), LINE(35), COL_DIM,
 			"~34s");
 
-		// Bottom touch zone indicator
 		draw_separator(LINE(37));
 		int settings_col = (TFT_COLS - 14) / 2;
 		tft_draw_string(COL(settings_col), LINE(38), COL_DIM, "Tap for Setup");
@@ -470,6 +462,8 @@ typedef struct {
 } setting_info_t;
 
 static const setting_info_t setting_info[SETTING_COUNT] = {
+	{ "Identity",  false },
+	{ "Baud",      false },
 	{ "Smooth",    true  },
 	{ "Max/Frame", false },
 	{ "Humanize",  true  },
@@ -487,7 +481,6 @@ static void draw_settings(void)
 
 	tft_fill(COL_BG);
 
-	// Title
 	int title_col = (TFT_COLS - 8) / 2;
 	tft_draw_string(COL(title_col), LINE(0), COL_CYAN, "SETTINGS");
 	draw_separator(LINE(1));
@@ -505,6 +498,30 @@ static void draw_settings(void)
 		const char *val_str = NULL;
 		uint8_t val_col = COL_WHITE;
 		switch ((setting_id_t)i) {
+		case SETTING_IDENTITY: {
+			const char *names[] = { "MACKU", "Ferrum" };
+			uint8_t id = (uint8_t)g_settings.identity;
+			if (id >= IDENTITY_COUNT) id = 0;
+			val_str = names[id];
+			val_col = COL_CYAN;
+			break;
+		}
+		case SETTING_BAUD: {
+			// Show baud as compact string: "115K", "921K", "1M", "2M", etc.
+			uint32_t b = g_settings.baud;
+			p = buf;
+			if (b >= 1000000) {
+				p = u32_to_str(p, b / 1000000);
+				*p++ = 'M';
+			} else {
+				p = u32_to_str(p, b / 1000);
+				*p++ = 'K';
+			}
+			fmt_done(buf, p);
+			val_str = buf;
+			val_col = COL_YELLOW;
+			break;
+		}
 		case SETTING_SMOOTH_ENABLED:
 			val_str = g_settings.smooth_enabled ? "ON" : "OFF";
 			val_col = g_settings.smooth_enabled ? COL_GREEN : COL_RED;
@@ -532,7 +549,7 @@ static void draw_settings(void)
 
 		if (i == g_selected_setting) {
 			int hint_y = y + FH;
-			if (setting_info[i].is_bool) {
+			if (setting_info[i].is_bool || (setting_id_t)i == SETTING_IDENTITY) {
 				int hint_col = (TFT_COLS - 12) / 2;
 				tft_draw_string(COL(hint_col), hint_y, COL_DIM, "Tap to toggle");
 			} else {
@@ -547,8 +564,6 @@ static void draw_settings(void)
 	int back_col = (TFT_COLS - 4) / 2;
 	tft_draw_string(COL(back_col), LINE(MENU_BACK_Y), COL_CYAN, "Back");
 }
-
-// ---- Touch handling ----
 
 bool tft_display_touch(uint16_t x, uint16_t y)
 {
@@ -586,6 +601,33 @@ bool tft_display_touch(uint16_t x, uint16_t y)
 			// Already selected — modify value
 			bool left_half = (x < TFT_WIDTH / 2);
 			switch ((setting_id_t)i) {
+			case SETTING_IDENTITY:
+				// Toggle, but Ferrum only allowed at >= 2Mbaud
+				if (g_settings.identity == IDENTITY_MACKU) {
+					if (g_settings.baud >= 2000000)
+						g_settings.identity = IDENTITY_FERRUM;
+				} else {
+					g_settings.identity = IDENTITY_MACKU;
+				}
+				return true;
+			case SETTING_BAUD: {
+				// Find current index in presets, step [-] or [+]
+				int idx = -1;
+				for (int j = 0; j < (int)BAUD_PRESET_COUNT; j++) {
+					if (baud_presets[j] == g_settings.baud) { idx = j; break; }
+				}
+				if (idx < 0) idx = 0; // snap to first if custom
+				if (left_half) {
+					if (idx > 0) idx--;
+				} else {
+					if (idx < (int)BAUD_PRESET_COUNT - 1) idx++;
+				}
+				g_settings.baud = baud_presets[idx];
+				// Auto-update identity: force MACKU if dropping below 2M
+				if (g_settings.baud < 2000000)
+					g_settings.identity = IDENTITY_MACKU;
+				return true;
+			}
 			case SETTING_SMOOTH_ENABLED:
 				g_settings.smooth_enabled = !g_settings.smooth_enabled;
 				return true;
@@ -651,8 +693,6 @@ void tft_display_update(const tft_proxy_stats_t *stats)
 	} else {
 		draw_stats(stats);
 	}
-	// Caller handles non-blocking sync via tft_swap_buffers() +
-	// tft_sync_begin() to keep the CPU free for USB work.
 }
 
 void tft_display_error(const char *msg)

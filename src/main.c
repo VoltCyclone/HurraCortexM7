@@ -1,7 +1,4 @@
-// imxrtnsy — USB proxy for Teensy 4.1
-// Phase 1: Capture descriptors from device on USB2 (host)
-// Phase 2: Replay as device on USB1, forward HID reports
-// Supports composite devices with multiple HID interfaces.
+// main.c — USB HID proxy for Teensy 4.1
 
 #include <stdint.h>
 #include <stddef.h>
@@ -45,9 +42,7 @@ static void led_blink_forever(uint8_t code, uint32_t on_ms, uint32_t off_ms)
 static void led_pwm_init(void) { }
 static void led_pwm_set(uint8_t brightness) { (void)brightness; }
 #else
-// ---- FlexPWM2 channel A02 on pin 13 (GPIO_B0_03 ALT1) ----
-// Hardware PWM for LED brightness: zero CPU overhead after setup.
-// PWM frequency ~1kHz at IPG/128 prescaler.
+// FlexPWM2 channel A02 on pin 13 (GPIO_B0_03 ALT1)
 static bool led_pwm_active;
 
 static void led_pwm_init(void)
@@ -129,7 +124,6 @@ static void led_wait_once(uint8_t pulses, uint32_t on_ms, uint32_t off_ms, uint3
 	delay(gap_ms);
 }
 
-// Endpoint mapping: host poll slot -> device EP number
 typedef struct {
 	uint8_t  host_slot;
 	uint8_t  dev_ep_num;
@@ -137,7 +131,6 @@ typedef struct {
 	uint8_t  iface_protocol;  // 1=keyboard, 2=mouse (for kmbox merge)
 } ep_mapping_t;
 
-// ---- PIT0: smooth injection timing with humanized jitter ----
 static volatile bool pit_tick_pending;
 static volatile uint32_t pit_next_ldval; // precomputed by main loop
 static uint32_t pit_base_ldval;          // nominal reload value (set after enumeration)
@@ -152,8 +145,6 @@ static void pit0_isr(void)
 // Static to keep off the stack (~3.6KB struct)
 static captured_descriptors_t desc;
 
-// ---- TEMPMON: CPU die temperature ----
-// Calibration from OCOTP fuses (read once at init)
 static uint32_t room_count, hot_count;
 static int32_t  hot_temp;
 
@@ -183,7 +174,6 @@ static int8_t tempmon_read(void)
 	return (int8_t)(hot_temp - num / den);
 }
 
-// ---- USB descriptor helpers for display ----
 static uint16_t desc_vid(void)
 {
 	return (uint16_t)desc.device_desc[8] | ((uint16_t)desc.device_desc[9] << 8);
@@ -220,7 +210,6 @@ static void desc_product_string(char *out, int outlen)
 
 int main(void)
 {
-	// Enable SEVONPEND so WFE wakes on any pending interrupt
 	SCB_SCR |= SCB_SCR_SEVONPEND;
 
 #if NET_ENABLED
@@ -386,20 +375,13 @@ int main(void)
 #endif
 
 	while (1) {
-		usb_device_poll();
-#if NET_ENABLED
-		kmnet_poll();
-#else
-		kmbox_poll();
-#endif
-#if BT_ENABLED
-		bt_poll();
-#endif
+		uint32_t now = millis();
 		bool did_work = false;
+
+		// --- Latency-critical: smooth injection first ---
 		if (pit_tick_pending) {
 			pit_tick_pending = false;
 			did_work = true;
-			// Compute next PIT interval (FPU math, safe in main loop)
 			bool skip = false;
 			uint32_t next_ldval = smooth_timing_next(pit_base_ldval, &skip);
 			pit_next_ldval = next_ldval;
@@ -409,6 +391,19 @@ int main(void)
 				if (sx || sy) kmbox_inject_smooth(sx, sy);
 			}
 		}
+
+		// --- USB device EP completion (unblock EPs for next send) ---
+		usb_device_poll();
+
+		// --- Command input ---
+#if NET_ENABLED
+		kmnet_poll();
+#else
+		kmbox_poll();
+#endif
+#if BT_ENABLED
+		bt_poll();
+#endif
 
 		for (uint8_t m = 0; m < num_ep_mappings; m++) {
 			uint8_t *rpt_ptr = NULL;
@@ -426,10 +421,10 @@ int main(void)
 					drop_count++;
 				}
 				led_on();
-				led_off_time = millis() + 2;
+				led_off_time = now + 2;
 			}
 		}
-		if (led_off_time && millis() >= led_off_time) {
+		if (led_off_time && now >= led_off_time) {
 			led_off();
 			led_off_time = 0;
 		}
@@ -442,8 +437,7 @@ int main(void)
 		// when idle; handles span boundaries when ISR signals done.
 		tft_sync_continue();
 
-		if ((millis() - last_tft_update) >= 33 && !tft_sync_busy()) {
-			uint32_t now = millis();
+		if (!did_work && (now - last_tft_update) >= 33 && !tft_sync_busy()) {
 			uint32_t dt = now - prev_report_time;
 			if (dt > 0)
 				reports_per_sec = ((report_count - prev_report_count) * 1000) / dt;
@@ -513,18 +507,21 @@ int main(void)
 					if (tft_display_touch(tp.x, tp.y)) {
 						const tft_settings_t *cfg = tft_display_get_settings();
 						smooth_set_max_per_frame(cfg->smooth_max);
+						g_identity_mode = (uint8_t)cfg->identity;
+						if (cfg->baud != kmbox_current_baud())
+							kmbox_set_baud(cfg->baud);
 					}
 				}
 			}
 		}
 #endif
-		if ((millis() - led_pwm_update) >= 100) {
+		if ((now - led_pwm_update) >= 100) {
 			uint32_t delta = report_count - led_report_snapshot;
 			led_report_snapshot = report_count;
 			uint32_t brightness = delta * 10 * 255 / 1000;
 			if (brightness > 255) brightness = 255;
 			led_pwm_set((uint8_t)brightness);
-			led_pwm_update = millis();
+			led_pwm_update = now;
 		}
 		if ((++loop_count & 0x3FF) == 0) {
 			if (!usb_host_device_connected()) {

@@ -1,6 +1,4 @@
-// udp.c — Minimal UDP/IP/ARP stack for bare-metal Teensy 4.1
-// Handles: ARP request/reply, IPv4 (no fragmentation), UDP, ICMP echo reply
-// Single-entry ARP cache, static IP only.
+// udp.c — Bare-metal UDP/IP/ARP stack
 
 #if !NET_ENABLED
 typedef int _udp_unused;
@@ -10,7 +8,6 @@ typedef int _udp_unused;
 #include "enet.h"
 #include <string.h>
 
-// ---- Protocol constants ----
 #define ETH_ALEN       6
 #define ETH_HLEN       14
 #define ETH_TYPE_ARP   0x0806
@@ -22,35 +19,28 @@ typedef int _udp_unused;
 #define ARP_OP_REQUEST 1
 #define ARP_OP_REPLY   2
 
-// ---- Network byte order helpers ----
 static inline uint16_t htons(uint16_t v) { return __builtin_bswap16(v); }
 static inline uint32_t htonl(uint32_t v) { return __builtin_bswap32(v); }
 static inline uint16_t ntohs(uint16_t v) { return __builtin_bswap16(v); }
 static inline uint32_t ntohl(uint32_t v) { return __builtin_bswap32(v); }
 
-// Read big-endian values from unaligned memory
 static inline uint16_t rd16(const uint8_t *p) { return ((uint16_t)p[0] << 8) | p[1]; }
 static inline uint32_t rd32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
 
-// Write big-endian values to unaligned memory
 static inline void wr16(uint8_t *p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
 static inline void wr32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
 
-// ---- State ----
 static uint32_t our_ip;
 static uint32_t our_netmask;
 static uint32_t our_gateway;
 static uint8_t  our_mac[ETH_ALEN];
 
-// Single-entry ARP cache
 static uint32_t arp_cache_ip;
 static uint8_t  arp_cache_mac[ETH_ALEN];
 static bool     arp_cache_valid;
 
-// TX frame buffer (reused for all outgoing frames)
 static uint8_t tx_frame[1518];
 
-// ---- Internet checksum (RFC 1071) ----
 static uint16_t ip_checksum(const void *data, uint16_t len)
 {
 	const uint8_t *p = (const uint8_t *)data;
@@ -64,8 +54,6 @@ static uint16_t ip_checksum(const void *data, uint16_t len)
 	return (uint16_t)~sum;
 }
 
-// ---- Ethernet frame helpers ----
-
 static void eth_build_header(uint8_t *frame, const uint8_t *dst_mac, uint16_t ethertype)
 {
 	memcpy(frame, dst_mac, ETH_ALEN);
@@ -73,16 +61,14 @@ static void eth_build_header(uint8_t *frame, const uint8_t *dst_mac, uint16_t et
 	wr16(frame + 12, ethertype);
 }
 
-// ---- ARP handling ----
-
 static void arp_send_reply(const uint8_t *target_mac, uint32_t target_ip)
 {
 	eth_build_header(tx_frame, target_mac, ETH_TYPE_ARP);
 	uint8_t *arp = tx_frame + ETH_HLEN;
-	wr16(arp + 0, 1);             // hardware type: Ethernet
-	wr16(arp + 2, ETH_TYPE_IPV4); // protocol type: IPv4
-	arp[4] = 6;                   // hardware addr len
-	arp[5] = 4;                   // protocol addr len
+	wr16(arp + 0, 1);
+	wr16(arp + 2, ETH_TYPE_IPV4);
+	arp[4] = 6;
+	arp[5] = 4;
 	wr16(arp + 6, ARP_OP_REPLY);
 	memcpy(arp + 8,  our_mac, ETH_ALEN);
 	wr32(arp + 14, our_ip);
@@ -103,7 +89,7 @@ static void arp_send_request(uint32_t target_ip)
 	wr16(arp + 6, ARP_OP_REQUEST);
 	memcpy(arp + 8,  our_mac, ETH_ALEN);
 	wr32(arp + 14, our_ip);
-	memset(arp + 18, 0, ETH_ALEN);  // target MAC unknown
+	memset(arp + 18, 0, ETH_ALEN);
 	wr32(arp + 24, target_ip);
 	enet_tx(tx_frame, ETH_HLEN + 28);
 }
@@ -113,14 +99,12 @@ static void handle_arp(const uint8_t *frame, int len)
 	if (len < ETH_HLEN + 28) return;
 	const uint8_t *arp = frame + ETH_HLEN;
 
-	// Only handle Ethernet/IPv4 ARP
 	if (rd16(arp) != 1 || rd16(arp + 2) != ETH_TYPE_IPV4) return;
 
 	uint16_t op = rd16(arp + 6);
 	uint32_t sender_ip = rd32(arp + 14);
 	uint32_t target_ip = rd32(arp + 24);
 
-	// Cache sender's MAC/IP (learn from any ARP packet)
 	arp_cache_ip = sender_ip;
 	memcpy(arp_cache_mac, arp + 8, ETH_ALEN);
 	arp_cache_valid = true;
@@ -130,14 +114,12 @@ static void handle_arp(const uint8_t *frame, int len)
 	}
 }
 
-// ---- ICMP echo reply ----
-
 static void handle_icmp(const uint8_t *frame, int len,
                         const uint8_t *ip_hdr, uint16_t ip_payload_len)
 {
 	const uint8_t *icmp = ip_hdr + 20;
 	if (ip_payload_len < 8) return;
-	if (icmp[0] != 8) return;  // Only handle echo request (type 8)
+	if (icmp[0] != 8) return;
 
 	// Build reply: swap src/dst IP, type=0 (echo reply)
 	uint16_t total = ETH_HLEN + 20 + ip_payload_len;
@@ -166,9 +148,6 @@ static void handle_icmp(const uint8_t *frame, int len,
 	enet_tx(tx_frame, total);
 }
 
-// ---- IPv4 / UDP handling ----
-
-// Saved UDP packet data (valid until next udp_poll)
 static udp_packet_t last_pkt;
 static bool pkt_ready;
 
@@ -204,7 +183,6 @@ static void handle_ipv4(const uint8_t *frame, int len)
 	uint16_t ip_payload_len = total_len - ihl;
 	const uint8_t *payload = ip + ihl;
 
-	// Cache sender MAC for ARP (learn from IP packets too)
 	uint32_t src_ip = rd32(ip + 12);
 	arp_cache_ip = src_ip;
 	memcpy(arp_cache_mac, frame + ETH_ALEN, ETH_ALEN);
@@ -229,8 +207,6 @@ static void handle_ipv4(const uint8_t *frame, int len)
 	last_pkt.len    = udp_len - 8;
 	pkt_ready = true;
 }
-
-// ---- Public API ----
 
 void udp_init(uint32_t ip, uint32_t netmask, uint32_t gateway)
 {

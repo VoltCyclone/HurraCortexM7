@@ -1,12 +1,4 @@
-// EHCI USB Host controller driver for Teensy 4.1 USB2 port
-// Bare-metal, polled transfer completion (QH token checks).
-// A minimal USB2 ISR clears USBSTS so SEVONPEND can wake WFE
-// on transfer completion, giving sub-µs wakeup instead of waiting
-// for the next PIT0 tick (~1 ms).
-//
-// DMA buffers are in a non-cacheable MPU region (.dmabuffers at 0x20200000).
-// No manual cache maintenance needed — bare DSBs drain the write buffer
-// before the USB controller is told to read DMA structures.
+// usb_host.c — EHCI host on USB2, polled completion, DMA in .dmabuffers
 
 #include <string.h>
 #include "imxrt.h"
@@ -15,7 +7,6 @@
 extern uint32_t millis(void);
 extern void delay(uint32_t msec);
 
-// Statically allocated EHCI structures in DMA-capable RAM
 static ehci_qh_t   qh_async   __attribute__((section(".dmabuffers"), aligned(64)));
 static ehci_qtd_t  qtd_setup  __attribute__((section(".dmabuffers"), aligned(32)));
 static ehci_qtd_t  qtd_data   __attribute__((section(".dmabuffers"), aligned(32)));
@@ -38,9 +29,6 @@ static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned
 
 static uint8_t device_speed = USB_SPEED_FULL;
 
-// Minimal USB2 ISR — clears USBSTS so the interrupt deasserts.
-// The NVIC pending → event path (SEVONPEND) wakes WFE in the main loop.
-// Transfer results are consumed by polling QH/qTD tokens, not USBSTS.
 static void usb2_isr(void)
 {
 	USB2_USBSTS = USB2_USBSTS; // W1C all pending status bits
@@ -180,31 +168,25 @@ void usb_host_port_reset(void)
 	delay(10); // Recovery time after reset
 }
 
-// Set up QH for a control endpoint on a given device address
 static void setup_qh_for_control(uint8_t addr, uint8_t maxpkt, uint8_t speed)
 {
 	memset(&qh_async, 0, sizeof(qh_async));
-	qh_async.horizontal_link = (uint32_t)&qh_async | 0x02; // QH type, point to self
+	qh_async.horizontal_link = (uint32_t)&qh_async | 0x02;
 
-	// Capabilities word 0:
-	// NAK reload = 15, max packet size, head flag, data toggle from qTD,
-	// speed, endpoint 0, address
 	uint32_t cap0 = 0;
-	cap0 |= (15 << 28);            // NAK reload count
-	if (speed != USB_SPEED_HIGH) {
-		cap0 |= (1 << 27);         // C-bit: control endpoint flag (required for FS/LS)
-	}
-	cap0 |= ((uint32_t)maxpkt << 16); // max packet length
-	cap0 |= (1 << 15);             // H-bit (head of reclamation)
-	cap0 |= (1 << 14);             // DTC - data toggle comes from qTD
-	cap0 |= ((uint32_t)speed << 12); // EPS - endpoint speed
-	cap0 |= (0 << 8);              // endpoint 0
-	cap0 |= addr;                  // device address
+	cap0 |= (15 << 28);
+	if (speed != USB_SPEED_HIGH)
+		cap0 |= (1 << 27);
+	cap0 |= ((uint32_t)maxpkt << 16);
+	cap0 |= (1 << 15);
+	cap0 |= (1 << 14);
+	cap0 |= ((uint32_t)speed << 12);
+	cap0 |= (0 << 8);
+	cap0 |= addr;
 
 	qh_async.capabilities[0] = cap0;
 
-	// Capabilities word 1: FrameTag mult = 1 (one transaction per micro-frame)
-	qh_async.capabilities[1] = (1 << 30); // Mult = 1
+	qh_async.capabilities[1] = (1 << 30);
 
 	qh_async.next = QTD_TERMINATE;
 	qh_async.alt_next = QTD_TERMINATE;
@@ -213,9 +195,6 @@ static void setup_qh_for_control(uint8_t addr, uint8_t maxpkt, uint8_t speed)
 	asm volatile("dsb" ::: "memory");
 }
 
-// Execute the qTD chain currently linked to the async QH.
-// The chain always ends with qtd_status (which has Active=1 initially).
-// Returns 0 on success, -1 on error.
 static int execute_transfer(uint32_t timeout_ms)
 {
 	USB2_ASYNCLISTADDR = (uint32_t)&qh_async;
@@ -322,9 +301,6 @@ int usb_host_control_transfer(uint8_t addr, uint8_t maxpkt,
 	return 0;
 }
 
-// Fire-and-forget control OUT transfer — sets up DMA, kicks hardware, returns immediately.
-// Result is ignored; hardware completes (or STALLs) on its own.
-// Caller must check usb_host_control_async_busy() to avoid clobbering an in-flight transfer.
 void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
 	const usb_setup_t *setup, uint8_t *data)
 {
