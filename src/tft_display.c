@@ -345,8 +345,8 @@ static void draw_stats(const tft_proxy_stats_t *s)
 		p = i8_to_str(p, s->cpu_temp_c);
 		*p++ = 'C';
 		fmt_done(buf, p);
-		uint8_t tcol = (s->cpu_temp_c > 80) ? COL_RED :
-		               (s->cpu_temp_c > 60) ? COL_YELLOW : COL_GREEN;
+		uint16_t tcol = (s->cpu_temp_c > 80) ? COL_RED :
+		                (s->cpu_temp_c > 60) ? COL_YELLOW : COL_GREEN;
 		tft_draw_string(COL(18), LINE(UPTIME_LINE), tcol, buf);
 	}
 
@@ -439,7 +439,7 @@ static void draw_stats(const tft_proxy_stats_t *s)
 			if (bh > gh) bh = gh;
 
 			int bx = gx0 + i * bar_step;
-			uint8_t col = (idx == newest) ? COL_CYAN : COL_GREEN;
+			uint16_t col = (idx == newest) ? COL_CYAN : COL_GREEN;
 
 			tft_draw_rect(bx, gy1 - bh, bx + bar_w - 1, gy1 - 1, col);
 		}
@@ -487,7 +487,7 @@ static void draw_settings(void)
 
 	for (uint8_t i = 0; i < SETTING_COUNT; i++) {
 		int y = LINE(MENU_START_Y + i * MENU_ITEM_H);
-		uint8_t label_col = (i == g_selected_setting) ? COL_YELLOW : COL_GRAY;
+		uint16_t label_col = (i == g_selected_setting) ? COL_YELLOW : COL_GRAY;
 
 		if (i == g_selected_setting) {
 			tft_draw_glyph(COL(0), y, COL_YELLOW, '>');
@@ -496,7 +496,7 @@ static void draw_settings(void)
 		tft_draw_string(COL(2), y, label_col, setting_info[i].label);
 
 		const char *val_str = NULL;
-		uint8_t val_col = COL_WHITE;
+		uint16_t val_col = COL_WHITE;
 		switch ((setting_id_t)i) {
 		case SETTING_IDENTITY: {
 			const char *names[] = { "MACKU", "Ferrum" };
@@ -683,6 +683,10 @@ void tft_display_init(void)
 		tft_draw_string(COL(drv_col), LINE(TFT_ROWS / 2 + 2), COL_DARK, "ST7735 TFT");
 	}
 	tft_swap_sync();
+
+	// Display On after first frame is in the panel's RAM —
+	// avoids a brief flash of undefined pixels on startup.
+	tft_command(0x29, 0, 0);
 }
 
 void tft_display_update(const tft_proxy_stats_t *stats)

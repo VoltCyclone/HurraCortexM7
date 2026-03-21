@@ -79,12 +79,11 @@ void ili9341_init_sequence(void)
 	};
 	tft_command(0xE1, ngamctrl, sizeof ngamctrl);
 
-	// Sleep out — must come after all config, before display on
+	// Sleep out — must come after all config, before pixel writes.
+	// Display On (0x29) is deferred until after the first frame is
+	// written so the panel doesn't briefly show undefined RAM.
 	tft_command(0x11, 0, 0);
 	delay(120);
-
-	// Display on
-	tft_command(0x29, 0, 0);
 
 	// Set initial window
 	uint8_t caset[] = { 0, 0, (tft_w - 1) >> 8, (tft_w - 1) & 0xFF };

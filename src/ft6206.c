@@ -1,6 +1,7 @@
 // ft6206.c — FT6206 capacitive touch driver for i.MX RT1062
 
 #include "ft6206.h"
+#include "tft.h"
 #include "imxrt.h"
 
 extern uint32_t millis(void);
@@ -206,9 +207,17 @@ bool ft6206_init(void)
 	// Stay in active mode (not monitor/hibernate)
 	i2c_write_reg(FT_REG_CTRL, 0x00);
 
-	// Trigger mode: INT stays low while touched (don't need the INT pin,
-	// but trigger mode keeps registers updated continuously for polling)
-	i2c_write_reg(FT_REG_G_MODE, 0x01);
+	// Trigger mode: INT stays low for the duration of a touch.
+	// Default (polling mode) only pulses INT for ~100µs per event —
+	// far too brief for our 20ms GPIO poll to catch reliably.
+	// Retry + verify: some FT6206 clones silently ignore this write.
+	for (int retry = 0; retry < 3; retry++) {
+		i2c_write_reg(FT_REG_G_MODE, 0x01);
+		uint8_t readback = 0xFF;
+		i2c_read_regs(FT_REG_G_MODE, &readback, 1);
+		if (readback == 0x01) break;
+		delay(10);
+	}
 
 	g_was_touched = false;
 	g_last_event_ms = 0;
@@ -230,10 +239,11 @@ touch_point_t ft6206_read(void)
 
 	uint16_t raw_x = ((uint16_t)(buf[1] & 0x0F) << 8) | buf[2];
 	uint16_t raw_y = ((uint16_t)(buf[3] & 0x0F) << 8) | buf[4];
-	// MADCTL=0x48 has MX=1 (column order reversed), so invert X only.
-	// FT6206 Y already matches display top-to-bottom.
-	pt.x = (raw_x < 240) ? (239 - raw_x) : 0;
-	pt.y = raw_y;
+	// FT6206 origin is bottom-right of the Adafruit panel;
+	// display origin (MADCTL=0x48, MX=1) is top-right.
+	// Invert both axes to map touch → framebuffer coordinates.
+	pt.x = (raw_x < tft_w) ? (tft_w - 1 - raw_x) : 0;
+	pt.y = (raw_y < tft_h) ? (tft_h - 1 - raw_y) : 0;
 	pt.valid = true;
 	return pt;
 }
@@ -253,7 +263,7 @@ bool ft6206_poll(touch_point_t *pt)
 
 	if (raw.valid) {
 		if (!g_was_touched) {
-			if ((now - g_last_event_ms) < 100) {
+			if ((now - g_last_event_ms) < 30) {
 				*pt = (touch_point_t){ .x = 0, .y = 0, .valid = false };
 				return false;
 			}
