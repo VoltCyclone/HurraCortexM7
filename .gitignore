@@ -1,0 +1,15 @@
+*.o
+*.elf
+*.hex
+*.bin
+*.uf2
+*.bak
+.DS_Store
+
+# Git worktrees
+.worktrees/
+
+# Vendor PDFs (datasheets, reference manuals, specs)
+# — too large to commit, often have redistribution restrictions
+docs/datasheets/*.pdf
+docs/specs/*.pdf

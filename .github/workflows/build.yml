@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Build firmware
+        run: make TOOLCHAIN=/usr/bin
+
+      - name: Upload firmware.hex
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-hex
+          path: firmware.hex
