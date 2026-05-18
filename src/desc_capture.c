@@ -126,6 +126,35 @@ static void capture_bos(captured_descriptors_t *desc)
 	desc->bos_desc_len = (uint16_t)ret;
 }
 
+static void capture_ms_os_1_0(captured_descriptors_t *desc)
+{
+	// MS OS 1.0 lives at string index 0xEE. Fixed 18-byte response with
+	// signature "MSFT100" at offset 2 (UTF-16LE).
+	usb_setup_t setup = make_get_descriptor(USB_DESC_STRING, 0xEE, 0,
+		MS_OS_1_0_STRING_SIZE);
+	uint8_t buf[MS_OS_1_0_STRING_SIZE];
+	int ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
+		&setup, buf, 2000);
+
+	if (ret < MS_OS_1_0_STRING_SIZE || buf[1] != USB_DESC_STRING) {
+		desc->ms_os_desc_len = 0;
+		return;
+	}
+
+	// Verify "MSFT100" signature at offset 2 (UTF-16LE: M S F T 1 0 0)
+	static const uint8_t sig[] = {
+		'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0
+	};
+	if (memcmp(&buf[2], sig, sizeof(sig)) != 0) {
+		desc->ms_os_desc_len = 0;
+		return;
+	}
+
+	memcpy(desc->ms_os_desc, buf, MS_OS_1_0_STRING_SIZE);
+	desc->ms_os_desc_len = MS_OS_1_0_STRING_SIZE;
+	desc->ms_os_vendor_code = buf[16]; // bMS_VendorCode at offset 0x10
+}
+
 bool capture_descriptors(captured_descriptors_t *desc)
 {
 	memset(desc, 0, sizeof(*desc));
@@ -265,6 +294,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	if (ret < 0) return false;
 
 	capture_bos(desc);
+	capture_ms_os_1_0(desc);
 
 	// SET_IDLE for each HID interface — report only on change
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
