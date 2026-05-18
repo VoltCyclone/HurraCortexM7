@@ -311,34 +311,14 @@ static void handle_standard_request(const usb_setup_t *setup)
 
 static void handle_class_request(const usb_setup_t *setup)
 {
-	switch (setup->bRequest) {
-	case 0x0A: // SET_IDLE
-		ep0_tx_data(NULL, 0);
-		break;
-	case 0x0B: // SET_PROTOCOL
-		ep0_tx_data(NULL, 0);
-		break;
-	case 0x01: // GET_REPORT — return zeros (real data flows via interrupt EPs)
-		{
-			uint16_t len = setup->wLength;
-			if (len > sizeof(ep0_tx_buf)) len = sizeof(ep0_tx_buf);
-			memset(ep0_tx_buf, 0, len);
-			ep0_tx_data(ep0_tx_buf, len);
-		}
-		break;
-	case 0x09: // SET_REPORT — forward to real device (LED control, etc.)
-		handle_passthrough(setup);
-		return;
-	case 0x03: // GET_PROTOCOL
-		{
-			static const uint8_t proto = 1; // Report protocol
-			ep0_tx_data(&proto, 1);
-		}
-		break;
-	default:
-		ep0_stall();
-		break;
-	}
+	// Forward every class request to the upstream device. handle_passthrough()
+	// handles IN (synchronous round-trip), OUT-with-data (receive → ACK → defer
+	// forward), and OUT-no-data (ACK → defer forward) directions automatically.
+	//
+	// Previously we answered five of six HID class requests locally with stub
+	// data (GET_REPORT → zeros, GET_PROTOCOL → 1, SET_IDLE/SET_PROTOCOL → ACK,
+	// GET_IDLE → STALL because missing from switch). All five are now forwarded.
+	handle_passthrough(setup);
 }
 // Blocking receive of EP0 OUT data phase (for control transfers with host-to-device data).
 // Returns bytes received, or -1 on error/timeout.
