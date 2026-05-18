@@ -515,6 +515,90 @@ void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
 	link_periodic_schedule();
 }
 
+void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
+	uint16_t maxpkt)
+{
+	if (index >= MAX_INTR_OUT_EPS) return;
+
+	ehci_qh_t *qh = &qh_intr_out[index];
+	memset(qh, 0, sizeof(*qh));
+	uint32_t cap0 = 0;
+	cap0 |= ((uint32_t)maxpkt << 16);
+	cap0 |= ((uint32_t)device_speed << 12);
+	cap0 |= ((uint32_t)(ep & 0x0F) << 8);
+	cap0 |= addr;
+	qh->capabilities[0] = cap0;
+	uint32_t cap1 = (1 << 30); // Mult = 1
+	if (device_speed == USB_SPEED_HIGH) {
+		cap1 |= 0xFF;          // S-mask: all µFrames
+	} else {
+		cap1 |= 0x01;          // S-mask: start-split in µFrame 0
+		cap1 |= (0x1C << 8);   // C-mask: complete-split in µFrames 2,3,4
+	}
+	qh->capabilities[1] = cap1;
+
+	qh->next = QTD_TERMINATE;
+	qh->alt_next = QTD_TERMINATE;
+	qh->token = 0;
+
+	intr_out_initialized[index]     = true;
+	intr_out_transfer_active[index] = false;
+	intr_out_dev_addr[index]        = addr;
+	intr_out_ep_num[index]          = ep & 0x0F;
+
+	if (index >= num_intr_out_eps)
+		num_intr_out_eps = index + 1;
+
+	link_periodic_schedule();  // Both IN and OUT QHs will share the periodic frame list
+}
+
+bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t len)
+{
+	if (index >= MAX_INTR_OUT_EPS || !intr_out_initialized[index]) return false;
+	if (len > sizeof(intr_out_buf[0])) return false;
+
+	// Check whether the previous QTD has completed; if still active, refuse —
+	// caller must drain before sending the next packet.
+	if (intr_out_transfer_active[index]) {
+		uint32_t token = qh_intr_out[index].token;
+		if (token & QTD_TOKEN_ACTIVE) {
+			// Still in flight — bail unless we've been waiting too long
+			if ((millis() - intr_out_prime_time[index]) <= 100) {
+				return false;
+			}
+			// Stuck QTD: clear and re-arm below
+			qh_intr_out[index].token = token & QTD_TOKEN_TOGGLE;
+			qh_intr_out[index].next  = QTD_TERMINATE;
+			asm volatile("dsb" ::: "memory");
+		}
+		intr_out_transfer_active[index] = false;
+	}
+
+	ehci_qh_t *qh = &qh_intr_out[index];
+	uint8_t *buf  = intr_out_buf[index];
+	memcpy(buf, data, len);
+
+	uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;
+	qh->next     = QTD_TERMINATE;
+	qh->alt_next = QTD_TERMINATE;
+	qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_OUT |
+		QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
+	{
+		uint32_t a = (uint32_t)buf;
+		qh->buffer[0] = a;
+		a &= 0xFFFFF000;
+		qh->buffer[1] = a + 0x1000;
+		qh->buffer[2] = a + 0x2000;
+		qh->buffer[3] = a + 0x3000;
+		qh->buffer[4] = a + 0x4000;
+	}
+	asm volatile("dsb" ::: "memory");
+
+	intr_out_transfer_active[index] = true;
+	intr_out_prime_time[index]      = millis();
+	return true;
+}
+
 void usb_host_interrupt_dump_state(void)
 {
 }
