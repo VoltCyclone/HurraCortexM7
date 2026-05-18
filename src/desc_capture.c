@@ -166,14 +166,25 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		}
 	}
 
-	uint8_t str_buf[MAX_STRING_DESC_SIZE];
-	setup = make_get_descriptor(USB_DESC_STRING, 0, 0, 4);
+	// Capture the full LANGID descriptor (string index 0). We replay it
+	// verbatim downstream so the host sees the device's actual language list.
+	setup = make_get_descriptor(USB_DESC_STRING, 0, 0, MAX_LANGID_DESC_SIZE);
 	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
-		&setup, str_buf, 2000);
-	uint16_t langid = 0x0409; // Default to English
-	if (ret >= 4 && str_buf[1] == USB_DESC_STRING) {
-		langid = str_buf[2] | (str_buf[3] << 8);
+		&setup, desc->langid_desc, 2000);
+	desc->langid = 0x0409; // Default if device returns garbage / STALLs
+	desc->langid_desc_len = 0;
+	if (ret >= 4 && desc->langid_desc[1] == USB_DESC_STRING) {
+		desc->langid_desc_len = (uint8_t)ret;
+		// If the device claims a bLength larger than what we actually
+		// captured (because it had more LANGIDs than MAX_LANGID_DESC_SIZE
+		// could hold), patch the stored bLength down so downstream
+		// consumers don't walk off the end of our buffer.
+		if (desc->langid_desc[0] > desc->langid_desc_len) {
+			desc->langid_desc[0] = desc->langid_desc_len;
+		}
+		desc->langid = desc->langid_desc[2] | (desc->langid_desc[3] << 8);
 	}
+	uint16_t langid = desc->langid;  // local alias used by subsequent string fetches
 	uint8_t string_indices[3] = {
 		desc->device_desc[14], // iManufacturer
 		desc->device_desc[15], // iProduct
