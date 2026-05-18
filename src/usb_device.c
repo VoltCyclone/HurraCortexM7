@@ -131,6 +131,9 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 				data = langid_fallback;
 				len  = sizeof(langid_fallback);
 			}
+		} else if (desc_index == 0xEE && cap_desc->ms_os_desc_len > 0) {
+			data = cap_desc->ms_os_desc;
+			len  = cap_desc->ms_os_desc_len;
 		} else {
 			for (uint8_t i = 0; i < cap_desc->num_strings; i++) {
 				if (cap_desc->string_index[i] == desc_index) {
