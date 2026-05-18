@@ -79,3 +79,11 @@ int usb_host_interrupt_poll(uint8_t index, uint8_t *data, uint16_t len);
 // Caller must finish reading/modifying before calling poll again on this index.
 int usb_host_interrupt_poll_zerocopy(uint8_t index, uint8_t **data_ptr, uint16_t len);
 void usb_host_interrupt_dump_state(void);
+
+#define MAX_INTR_OUT_EPS 7
+
+void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
+	uint16_t maxpkt);
+// Returns true if the send was armed (QTD primed). Returns false if a previous
+// send on this slot is still in flight — caller should retry next poll cycle.
+bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t len);

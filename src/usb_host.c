@@ -25,6 +25,18 @@ static uint32_t    intr_prime_time[MAX_INTR_EPS];
 static uint8_t     intr_dev_addr[MAX_INTR_EPS];
 static uint8_t     intr_ep_num[MAX_INTR_EPS];
 static uint8_t     num_intr_eps = 0;
+static ehci_qh_t   qh_intr_out[MAX_INTR_OUT_EPS]
+	__attribute__((section(".dmabuffers"), aligned(64)));
+static ehci_qtd_t  qtd_intr_out[MAX_INTR_OUT_EPS]
+	__attribute__((section(".dmabuffers"), aligned(32)));
+static uint8_t     intr_out_buf[MAX_INTR_OUT_EPS][64]
+	__attribute__((section(".dmabuffers"), aligned(32)));
+static bool        intr_out_initialized[MAX_INTR_OUT_EPS];
+static bool        intr_out_transfer_active[MAX_INTR_OUT_EPS];
+static uint32_t    intr_out_prime_time[MAX_INTR_OUT_EPS];
+static uint8_t     intr_out_dev_addr[MAX_INTR_OUT_EPS];
+static uint8_t     intr_out_ep_num[MAX_INTR_OUT_EPS];
+static uint8_t     num_intr_out_eps = 0;
 static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned(4096)));
 
 static uint8_t device_speed = USB_SPEED_FULL;
