@@ -94,6 +94,38 @@ static bool parse_config_descriptor(captured_descriptors_t *desc)
 	return desc->num_ifaces > 0;
 }
 
+static void capture_bos(captured_descriptors_t *desc)
+{
+	// Probe BOS header (5 bytes: bLength, bDescriptorType, wTotalLength, bNumDeviceCaps)
+	usb_setup_t setup = make_get_descriptor(USB_DESC_BOS, 0, 0, 5);
+	uint8_t hdr[5];
+	int ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
+		&setup, hdr, 2000);
+
+	// Device doesn't support BOS — STALL. Not fatal; Phase 1 passthrough handles
+	// live requests if the host probes anyway.
+	if (ret < 5 || hdr[1] != USB_DESC_BOS) {
+		desc->bos_desc_len = 0;
+		return;
+	}
+
+	uint16_t total_len = hdr[2] | (hdr[3] << 8);
+	if (total_len < 5) {
+		desc->bos_desc_len = 0;
+		return;
+	}
+	if (total_len > MAX_BOS_DESC_SIZE) total_len = MAX_BOS_DESC_SIZE;
+
+	setup = make_get_descriptor(USB_DESC_BOS, 0, 0, total_len);
+	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
+		&setup, desc->bos_desc, 2000);
+	if (ret < 5 || desc->bos_desc[1] != USB_DESC_BOS) {
+		desc->bos_desc_len = 0;
+		return;
+	}
+	desc->bos_desc_len = (uint16_t)ret;
+}
+
 bool capture_descriptors(captured_descriptors_t *desc)
 {
 	memset(desc, 0, sizeof(*desc));
@@ -231,6 +263,8 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
 		&setup, NULL, 2000);
 	if (ret < 0) return false;
+
+	capture_bos(desc);
 
 	// SET_IDLE for each HID interface — report only on change
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {

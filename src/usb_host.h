@@ -35,6 +35,7 @@ typedef struct __attribute__((packed)) {
 #define USB_DESC_STRING         3
 #define USB_DESC_INTERFACE      4
 #define USB_DESC_ENDPOINT       5
+#define USB_DESC_BOS            0x0F
 #define USB_DESC_HID            0x21
 #define USB_DESC_HID_REPORT     0x22
 #define QTD_TOKEN_ACTIVE     (1 << 7)
