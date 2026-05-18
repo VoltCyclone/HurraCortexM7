@@ -669,6 +669,40 @@ bool usb_device_send_report(uint8_t ep_num, const uint8_t *data, uint16_t len)
 	return true;
 }
 
+int usb_device_poll_out(uint8_t ep_num, uint8_t **data_ptr)
+{
+	if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) return -1;
+	uint8_t slot = ep_to_slot_out[ep_num];
+	if (slot == 0xFF) return -1;  // EP not configured for OUT
+
+	uint32_t token = dtd_int_rx[slot].token;
+	if (token & DTD_ACTIVE) {
+		return 0;  // Still receiving
+	}
+	if (token & (DTD_HALTED | DTD_BUFFER_ERR | DTD_XACT_ERR)) {
+		// Error — re-prime on the same bank and report none
+		uint8_t bank = (out_active_bank_mask >> ep_num) & 1;
+		uint16_t maxpkt = sizeof(int_rx_buf[0][0]);
+		prime_int_out_ep(ep_num, slot, bank, maxpkt);
+		return 0;
+	}
+
+	uint8_t completed_bank = (out_active_bank_mask >> ep_num) & 1;
+	uint32_t remaining = (token >> 16) & 0x7FFF;
+	uint16_t maxpkt = sizeof(int_rx_buf[0][0]);
+	uint16_t got = (uint16_t)(maxpkt - remaining);
+
+	// Hand caller a pointer to the completed bank
+	*data_ptr = int_rx_buf[slot][completed_bank];
+
+	// Re-prime on the other bank so the next packet can land while caller
+	// is forwarding this one upstream.
+	uint8_t next_bank = completed_bank ^ 1;
+	prime_int_out_ep(ep_num, slot, next_bank, maxpkt);
+
+	return (int)got;
+}
+
 bool usb_device_is_configured(void)
 {
 	return dev_state == USB_DEV_STATE_CONFIGURED;
