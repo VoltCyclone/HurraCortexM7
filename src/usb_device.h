@@ -49,8 +49,9 @@ typedef enum {
 	USB_DEV_STATE_CONFIGURED
 } usb_dev_state_t;
 
-// Maximum interrupt IN endpoints for composite device support
-#define MAX_INT_EPS 4
+// Maximum interrupt IN endpoints for composite device support.
+// Hardware ceiling is USB_DEV_NUM_ENDPOINTS - 1 (EP0 reserved for control).
+#define MAX_INT_EPS 7
 
 // Public API
 bool usb_device_init(const captured_descriptors_t *desc);

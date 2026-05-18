@@ -69,7 +69,7 @@ void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
 	const usb_setup_t *setup, uint8_t *data);
 bool usb_host_control_async_busy(void);
 
-#define MAX_INTR_EPS 4
+#define MAX_INTR_EPS 7
 
 void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
 	uint16_t maxpkt);

@@ -5,8 +5,8 @@
 #define MAX_CONFIG_DESC_SIZE    512
 #define MAX_HID_REPORT_DESC_SIZE 512
 #define MAX_STRING_DESC_SIZE    128
-#define MAX_STRINGS             8
-#define MAX_INTERFACES          4
+#define MAX_STRINGS             16
+#define MAX_INTERFACES          8
 typedef struct {
 	uint8_t  iface_num;            // bInterfaceNumber
 	uint8_t  iface_class;          // bInterfaceClass (3 = HID)
