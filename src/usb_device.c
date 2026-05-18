@@ -177,7 +177,8 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 		break;
 
 	default:
-		break;
+		handle_passthrough(setup);
+		return;
 	}
 
 	if (data == NULL || len == 0) {
