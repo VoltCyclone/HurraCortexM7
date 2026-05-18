@@ -69,6 +69,29 @@ static void prime_int_ep(uint8_t ep_num, uint8_t slot, uint8_t bank, uint16_t le
 		active_bank_mask &= ~(1 << ep_num);
 	ep_busy_mask |= (1 << ep_num);
 }
+
+// Prime an interrupt OUT endpoint to receive into the given bank buffer.
+// Caller must ensure EP is not already armed for the same bank.
+static void prime_int_out_ep(uint8_t ep_num, uint8_t slot, uint8_t bank, uint16_t maxpkt)
+{
+	uint8_t qh_idx = ep_num * 2;  // OUT (RX) side of the dQH pair
+
+	dtd_int_rx[slot].next  = DTD_TERMINATE;
+	dtd_int_rx[slot].token = DTD_ACTIVE | DTD_IOC | DTD_TOTAL_BYTES(maxpkt);
+	dtd_int_rx[slot].buffer[0] = (uint32_t)int_rx_buf[slot][bank];
+	dtd_int_rx[slot].buffer[1] = ((uint32_t)int_rx_buf[slot][bank] + 4096) & ~0xFFFu;
+
+	dqh_list[qh_idx].next  = (uint32_t)&dtd_int_rx[slot];
+	dqh_list[qh_idx].token = 0;
+	asm volatile("dsb" ::: "memory");
+
+	USB1_ENDPTPRIME = (1 << ep_num);  // RX prime bit = ep_num (no +16)
+	if (bank)
+		out_active_bank_mask |= (1 << ep_num);
+	else
+		out_active_bank_mask &= ~(1 << ep_num);
+}
+
 static void ep0_tx_data(const uint8_t *data, uint16_t len)
 {
 	if (data && len > 0) {
@@ -262,6 +285,49 @@ static void configure_all_interrupt_endpoints(void)
 	}
 }
 
+static void configure_all_interrupt_out_endpoints(void)
+{
+	num_int_out_eps = 0;
+	memset(ep_to_slot_out, 0xFF, sizeof(ep_to_slot_out));
+	out_active_bank_mask = 0;
+	out_pending_mask = 0;
+
+	for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
+		const captured_iface_t *iface = &cap_desc->ifaces[i];
+		uint8_t ep_addr = iface->interrupt_out_ep;
+		if (ep_addr == 0) continue;
+
+		uint8_t ep_num = ep_addr & 0x0F;
+		if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
+		if (num_int_out_eps >= MAX_INT_OUT_EPS) break;
+
+		// Check for slot collision (same EP number already mapped)
+		if (ep_to_slot_out[ep_num] != 0xFF) continue;
+
+		uint8_t slot = num_int_out_eps++;
+		ep_to_slot_out[ep_num] = slot;
+
+		uint16_t maxpkt = iface->interrupt_out_maxpkt;
+		if (maxpkt > sizeof(int_rx_buf[0][0])) maxpkt = sizeof(int_rx_buf[0][0]);
+
+		// Configure OUT dQH (qh_idx = ep_num * 2, RX side)
+		uint8_t qh_idx = ep_num * 2;
+		memset(&dqh_list[qh_idx], 0, sizeof(usb_dev_dqh_t));
+		dqh_list[qh_idx].config = DQH_MAX_PACKET(maxpkt) | DQH_ZLT_DISABLE;
+		dqh_list[qh_idx].next = DTD_TERMINATE;
+		asm volatile("dsb" ::: "memory");
+
+		// ENDPTCTRL: enable RX, RX type = interrupt, reset RX toggle.
+		// Mirror IN-side pattern (TXE | TXT(3) | TXR) on the RX half.
+		// Use |= to preserve any TX bits already set for the same EP number.
+		volatile uint32_t *epctrl = endptctrl_reg(ep_num);
+		*epctrl |= USB_ENDPTCTRL_RXE | USB_ENDPTCTRL_RXT(3) | USB_ENDPTCTRL_RXR;
+
+		// Prime initial RX into bank 0
+		prime_int_out_ep(ep_num, slot, 0, maxpkt);
+	}
+}
+
 static void handle_set_configuration(const usb_setup_t *setup)
 {
 	uint8_t config_val = setup->wValue & 0xFF;
@@ -281,6 +347,7 @@ static void handle_set_configuration(const usb_setup_t *setup)
 		ep_busy_mask = 0;
 	} else {
 		configure_all_interrupt_endpoints();
+		configure_all_interrupt_out_endpoints();
 		dev_state = USB_DEV_STATE_CONFIGURED;
 	}
 
