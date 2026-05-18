@@ -34,6 +34,7 @@ static uint8_t ep_to_slot_out[USB_DEV_NUM_ENDPOINTS]; // OUT EP num -> slot
 static uint8_t num_int_out_eps;
 static uint8_t out_active_bank_mask;  // bit set = EP using bank 1, clear = bank 0
 static uint8_t out_pending_mask;      // bit set = EP has a completed packet waiting to be drained
+static uint16_t out_maxpkt[MAX_INT_OUT_EPS]; // wMaxPacketSize per OUT slot, clamped to buffer size
 
 static struct {
 	usb_setup_t setup;
@@ -312,6 +313,7 @@ static void configure_all_interrupt_out_endpoints(void)
 
 		uint16_t maxpkt = iface->interrupt_out_maxpkt;
 		if (maxpkt > sizeof(int_rx_buf[0][0])) maxpkt = sizeof(int_rx_buf[0][0]);
+		out_maxpkt[slot] = maxpkt;
 
 		// Configure OUT dQH (qh_idx = ep_num * 2, RX side)
 		uint8_t qh_idx = ep_num * 2;
@@ -682,17 +684,16 @@ int usb_device_poll_out(uint8_t ep_num, uint8_t **data_ptr)
 	if (token & DTD_ACTIVE) {
 		return 0;  // Still receiving
 	}
+	uint16_t maxpkt = out_maxpkt[slot];
 	if (token & (DTD_HALTED | DTD_BUFFER_ERR | DTD_XACT_ERR)) {
 		// Error — re-prime on the same bank and report none
 		uint8_t bank = (out_active_bank_mask >> ep_num) & 1;
-		uint16_t maxpkt = sizeof(int_rx_buf[0][0]);
 		prime_int_out_ep(ep_num, slot, bank, maxpkt);
 		return 0;
 	}
 
 	uint8_t completed_bank = (out_active_bank_mask >> ep_num) & 1;
 	uint32_t remaining = (token >> 16) & 0x7FFF;
-	uint16_t maxpkt = sizeof(int_rx_buf[0][0]);
 	uint16_t got = (uint16_t)(maxpkt - remaining);
 
 	// Hand caller a pointer to the completed bank
