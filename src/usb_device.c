@@ -142,7 +142,7 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 			uint16_t iface_num = setup->wIndex;
 			for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
 				if (cap_desc->ifaces[i].iface_num == iface_num &&
-				    cap_desc->ifaces[i].iface_class == 3) {
+				    cap_desc->ifaces[i].has_hid_desc) {
 					data = cap_desc->ifaces[i].hid_report_desc;
 					len = cap_desc->ifaces[i].hid_report_desc_len;
 					break;
