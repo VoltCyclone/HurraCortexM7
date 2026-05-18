@@ -53,8 +53,18 @@ typedef enum {
 // Hardware ceiling is USB_DEV_NUM_ENDPOINTS - 1 (EP0 reserved for control).
 #define MAX_INT_EPS 7
 
+// Maximum interrupt OUT endpoints — symmetric with MAX_INT_EPS, supports
+// passing host→device traffic on vendor interfaces (Logitech HID++, etc.)
+#define MAX_INT_OUT_EPS 7
+
 // Public API
 bool usb_device_init(const captured_descriptors_t *desc);
 void usb_device_poll(void);
 bool usb_device_send_report(uint8_t ep_num, const uint8_t *data, uint16_t len);
 bool usb_device_is_configured(void);
+
+// Drain a completed RX from the given device OUT EP. Returns:
+//   > 0  : bytes received, *data points into DMA buffer (valid until next call)
+//   = 0  : no completion yet
+//   < 0  : EP not configured / error
+int usb_device_poll_out(uint8_t ep_num, uint8_t **data_ptr);

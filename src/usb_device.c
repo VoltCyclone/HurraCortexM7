@@ -19,6 +19,10 @@ static uint8_t ep0_tx_buf[512] __attribute__((section(".dmabuffers"), aligned(32
 static uint8_t ep0_rx_buf[512] __attribute__((section(".dmabuffers"), aligned(32)));
 static uint8_t int_tx_buf[MAX_INT_EPS][2][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
+static usb_dev_dtd_t dtd_int_rx[MAX_INT_OUT_EPS]
+	__attribute__((section(".dmabuffers"), aligned(32)));
+static uint8_t int_rx_buf[MAX_INT_OUT_EPS][2][64]
+	__attribute__((section(".dmabuffers"), aligned(32)));
 static const captured_descriptors_t *cap_desc;
 static usb_dev_state_t dev_state;
 static uint8_t ep_to_slot[USB_DEV_NUM_ENDPOINTS]; // EP num -> dtd/buf slot
@@ -26,6 +30,10 @@ static uint8_t num_int_eps;
 static uint8_t ep_busy_mask;     // bit set = EP has active DMA transfer in flight
 static uint8_t active_bank_mask; // bit set = EP using bank 1, clear = bank 0
 static uint8_t pending_len[USB_DEV_NUM_ENDPOINTS];  // 0 = no pending report staged
+static uint8_t ep_to_slot_out[USB_DEV_NUM_ENDPOINTS]; // OUT EP num -> slot
+static uint8_t num_int_out_eps;
+static uint8_t out_active_bank_mask;  // bit set = EP using bank 1, clear = bank 0
+static uint8_t out_pending_mask;      // bit set = EP has a completed packet waiting to be drained
 
 static struct {
 	usb_setup_t setup;
