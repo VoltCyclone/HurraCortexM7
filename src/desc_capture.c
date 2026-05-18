@@ -145,6 +145,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		return false;
 	}
 	desc->config_desc_len = (uint16_t)ret;
+	desc->config_string_idx = desc->config_desc[6]; // iConfiguration
 	parse_config_descriptor(desc);
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
 		captured_iface_t *iface = &desc->ifaces[i];
@@ -185,24 +186,39 @@ bool capture_descriptors(captured_descriptors_t *desc)
 		desc->langid = desc->langid_desc[2] | (desc->langid_desc[3] << 8);
 	}
 	uint16_t langid = desc->langid;  // local alias used by subsequent string fetches
-	uint8_t string_indices[3] = {
-		desc->device_desc[14], // iManufacturer
-		desc->device_desc[15], // iProduct
-		desc->device_desc[16], // iSerialNumber
-	};
+	// Collect every string index referenced by the device, config, and
+	// interface descriptors. Dedup so we don't fetch the same index twice
+	// (common: many devices use the same string for multiple iInterface fields).
+	uint8_t string_indices[3 + 1 + MAX_INTERFACES];
+	uint8_t string_indices_count = 0;
+	string_indices[string_indices_count++] = desc->device_desc[14]; // iManufacturer
+	string_indices[string_indices_count++] = desc->device_desc[15]; // iProduct
+	string_indices[string_indices_count++] = desc->device_desc[16]; // iSerialNumber
+	string_indices[string_indices_count++] = desc->config_string_idx;
+	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
+		string_indices[string_indices_count++] = desc->ifaces[i].iface_string_idx;
+	}
 
 	desc->num_strings = 0;
-	for (int i = 0; i < 3; i++) {
-		if (string_indices[i] == 0) continue;
+	for (uint8_t i = 0; i < string_indices_count; i++) {
+		uint8_t idx = string_indices[i];
+		if (idx == 0) continue;
+
+		// Dedup: skip if already captured
+		bool already = false;
+		for (uint8_t j = 0; j < desc->num_strings; j++) {
+			if (desc->string_index[j] == idx) { already = true; break; }
+		}
+		if (already) continue;
 		if (desc->num_strings >= MAX_STRINGS) break;
 
-		setup = make_get_descriptor(USB_DESC_STRING, string_indices[i],
+		setup = make_get_descriptor(USB_DESC_STRING, idx,
 			langid, MAX_STRING_DESC_SIZE);
 		ret = usb_host_control_transfer(desc->dev_addr, desc->ep0_maxpkt,
 			&setup, desc->string_desc[desc->num_strings], 2000);
 		if (ret > 0) {
 			desc->string_desc_len[desc->num_strings] = ret;
-			desc->string_index[desc->num_strings] = string_indices[i];
+			desc->string_index[desc->num_strings] = idx;
 			desc->num_strings++;
 		}
 	}
