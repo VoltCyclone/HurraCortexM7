@@ -46,6 +46,12 @@ typedef struct {
 	uint8_t  iface_protocol;  // 1=keyboard, 2=mouse (for kmbox merge)
 } ep_mapping_t;
 
+typedef struct {
+	uint8_t host_slot;     // index into usb_host's intr_out arrays
+	uint8_t dev_ep_num;    // device-side EP number to poll
+	uint16_t maxpkt;
+} ep_out_mapping_t;
+
 static volatile bool pit_tick_pending;
 static volatile uint32_t pit_next_ldval; // precomputed by main loop
 static uint32_t pit_base_ldval;          // nominal reload value (set after enumeration)
@@ -151,6 +157,8 @@ int main(void)
 	}
 	ep_mapping_t ep_map[MAX_INTR_EPS];
 	uint8_t num_ep_mappings = 0;
+	ep_out_mapping_t out_map[MAX_INTR_OUT_EPS];
+	uint8_t num_out_mappings = 0;
 
 	for (uint8_t i = 0; i < desc.num_ifaces; i++) {
 		if (desc.ifaces[i].interrupt_in_ep == 0) continue;
@@ -166,6 +174,22 @@ int main(void)
 		ep_map[slot].maxpkt          = desc.ifaces[i].interrupt_in_maxpkt;
 		ep_map[slot].iface_protocol  = desc.ifaces[i].iface_protocol;
 		num_ep_mappings++;
+	}
+
+	for (uint8_t i = 0; i < desc.num_ifaces; i++) {
+		if (desc.ifaces[i].interrupt_out_ep == 0) continue;
+		if (num_out_mappings >= MAX_INTR_OUT_EPS) break;
+
+		uint8_t slot = num_out_mappings;
+		uint8_t ep = desc.ifaces[i].interrupt_out_ep & 0x0F;
+
+		usb_host_interrupt_out_init(slot, desc.dev_addr, ep,
+			desc.ifaces[i].interrupt_out_maxpkt);
+
+		out_map[slot].host_slot  = slot;
+		out_map[slot].dev_ep_num = ep;
+		out_map[slot].maxpkt     = desc.ifaces[i].interrupt_out_maxpkt;
+		num_out_mappings++;
 	}
 
 	// Start PIT0 at the mouse's poll rate (from bInterval + device speed)
