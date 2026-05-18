@@ -16,9 +16,12 @@ typedef struct {
 	uint8_t  iface_subclass;       // bInterfaceSubClass
 	uint8_t  iface_protocol;       // bInterfaceProtocol
 	uint8_t  iface_string_idx;     // iInterface string index (0 if none)
-	uint8_t  interrupt_ep;         // IN EP addr (0x81 etc), 0 if none
-	uint16_t interrupt_maxpkt;     // max packet size for interrupt EP
-	uint8_t  interrupt_interval;   // polling interval
+	uint8_t  interrupt_in_ep;       // IN EP addr (0x81 etc), 0 if none
+	uint16_t interrupt_in_maxpkt;   // max packet size for interrupt IN EP
+	uint8_t  interrupt_in_interval; // polling interval for IN
+	uint8_t  interrupt_out_ep;      // OUT EP addr (0x01 etc), 0 if none
+	uint16_t interrupt_out_maxpkt;  // max packet size for interrupt OUT EP
+	uint8_t  interrupt_out_interval;// polling interval for OUT
 	bool     has_hid_desc;         // true if interface contained a HID descriptor
 	uint8_t  hid_report_desc[MAX_HID_REPORT_DESC_SIZE];
 	uint16_t hid_report_desc_len;  // 0 if not HID or not fetched

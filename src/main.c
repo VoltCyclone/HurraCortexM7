@@ -153,17 +153,17 @@ int main(void)
 	uint8_t num_ep_mappings = 0;
 
 	for (uint8_t i = 0; i < desc.num_ifaces; i++) {
-		if (desc.ifaces[i].interrupt_ep == 0) continue;
+		if (desc.ifaces[i].interrupt_in_ep == 0) continue;
 		if (num_ep_mappings >= MAX_INTR_EPS) break;
 		uint8_t slot = num_ep_mappings;
-		uint8_t ep = desc.ifaces[i].interrupt_ep & 0x0F;
+		uint8_t ep = desc.ifaces[i].interrupt_in_ep & 0x0F;
 
 		usb_host_interrupt_init(slot, desc.dev_addr, ep,
-			desc.ifaces[i].interrupt_maxpkt);
+			desc.ifaces[i].interrupt_in_maxpkt);
 
 		ep_map[slot].host_slot       = slot;
 		ep_map[slot].dev_ep_num      = ep;
-		ep_map[slot].maxpkt          = desc.ifaces[i].interrupt_maxpkt;
+		ep_map[slot].maxpkt          = desc.ifaces[i].interrupt_in_maxpkt;
 		ep_map[slot].iface_protocol  = desc.ifaces[i].iface_protocol;
 		num_ep_mappings++;
 	}
@@ -173,7 +173,7 @@ int main(void)
 		uint32_t interval_us = 1000; // default 1ms = 1kHz
 		for (uint8_t i = 0; i < desc.num_ifaces; i++) {
 			if (desc.ifaces[i].iface_protocol != 2) continue;
-			uint8_t bint = desc.ifaces[i].interrupt_interval;
+			uint8_t bint = desc.ifaces[i].interrupt_in_interval;
 			if (bint == 0) bint = 1;
 			if (speed == 2) {
 				// High-speed: 2^(bInterval-1) * 125 µs

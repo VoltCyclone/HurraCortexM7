@@ -492,11 +492,11 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 	mouse_layout.wheel_bit = 0xFFFF;
 	cached_mouse_report_len = 0;
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
-		if (desc->ifaces[i].interrupt_ep == 0) continue;
-		uint8_t ep = desc->ifaces[i].interrupt_ep & 0x0F;
+		if (desc->ifaces[i].interrupt_in_ep == 0) continue;
+		uint8_t ep = desc->ifaces[i].interrupt_in_ep & 0x0F;
 		if (desc->ifaces[i].iface_protocol == 2 && !cached_mouse_ep) {
 			cached_mouse_ep = ep;
-			cached_mouse_maxpkt = desc->ifaces[i].interrupt_maxpkt;
+			cached_mouse_maxpkt = desc->ifaces[i].interrupt_in_maxpkt;
 			parse_mouse_layout(desc->ifaces[i].hid_report_desc,
 			                   desc->ifaces[i].hid_report_desc_len);
 		} else if (desc->ifaces[i].iface_protocol == 1 && !cached_kb_ep) {

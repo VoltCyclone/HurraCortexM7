@@ -229,9 +229,9 @@ static void configure_all_interrupt_endpoints(void)
 
 	for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
 		const captured_iface_t *iface = &cap_desc->ifaces[i];
-		if (iface->interrupt_ep == 0) continue;
+		if (iface->interrupt_in_ep == 0) continue;
 
-		uint8_t ep_num = iface->interrupt_ep & 0x0F;
+		uint8_t ep_num = iface->interrupt_in_ep & 0x0F;
 		if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
 		if (num_int_eps >= MAX_INT_EPS) break;
 
@@ -241,7 +241,7 @@ static void configure_all_interrupt_endpoints(void)
 		uint8_t slot = num_int_eps++;
 		ep_to_slot[ep_num] = slot;
 
-		uint16_t maxpkt = iface->interrupt_maxpkt;
+		uint16_t maxpkt = iface->interrupt_in_maxpkt;
 		uint8_t qh_idx = ep_num * 2 + 1;
 
 		memset(&dqh_list[qh_idx], 0, sizeof(usb_dev_dqh_t));
@@ -261,7 +261,7 @@ static void handle_set_configuration(const usb_setup_t *setup)
 	if (config_val == 0) {
 		dev_state = USB_DEV_STATE_ADDRESS;
 		for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
-			uint8_t ep_num = cap_desc->ifaces[i].interrupt_ep & 0x0F;
+			uint8_t ep_num = cap_desc->ifaces[i].interrupt_in_ep & 0x0F;
 			if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
 			USB1_ENDPTFLUSH = (1 << (16 + ep_num));
 			while (USB1_ENDPTFLUSH) ;

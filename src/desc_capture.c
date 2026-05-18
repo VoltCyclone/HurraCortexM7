@@ -81,10 +81,18 @@ static bool parse_config_descriptor(captured_descriptors_t *desc)
 			uint8_t ep_attr = p[3];
 			uint16_t ep_maxpkt = p[4] | (p[5] << 8);
 			uint8_t ep_interval = p[6];
-			if ((ep_attr & 3) == 3 && (ep_addr & 0x80)) {
-				cur_iface->interrupt_ep       = ep_addr;
-				cur_iface->interrupt_maxpkt   = ep_maxpkt;
-				cur_iface->interrupt_interval = ep_interval;
+			if ((ep_attr & 3) == 3) {  // Interrupt endpoint (Type bits = 11b)
+				if (ep_addr & 0x80) {
+					// IN direction (bit 7 set in address)
+					cur_iface->interrupt_in_ep       = ep_addr;
+					cur_iface->interrupt_in_maxpkt   = ep_maxpkt;
+					cur_iface->interrupt_in_interval = ep_interval;
+				} else {
+					// OUT direction
+					cur_iface->interrupt_out_ep       = ep_addr;
+					cur_iface->interrupt_out_maxpkt   = ep_maxpkt;
+					cur_iface->interrupt_out_interval = ep_interval;
+				}
 			}
 		}
 
