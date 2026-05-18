@@ -290,6 +290,16 @@ int main(void)
 				led_off_time = now + 2;
 			}
 		}
+		for (uint8_t m = 0; m < num_out_mappings; m++) {
+			uint8_t *out_data = NULL;
+			int n = usb_device_poll_out(out_map[m].dev_ep_num, &out_data);
+			if (n > 0 && out_data) {
+				// Best-effort: if host-side OUT is still busy, drop this packet.
+				// Real-world OUT traffic is low rate (vendor config), so back-pressure
+				// via drop is acceptable. If this becomes a problem, add a small ring.
+				(void)usb_host_interrupt_out_send(out_map[m].host_slot, out_data, (uint16_t)n);
+			}
+		}
 		if (led_off_time && now >= led_off_time) {
 			led_off();
 			led_off_time = 0;
