@@ -440,6 +440,10 @@ static void link_periodic_schedule(void)
 static uint32_t intr_halt_count[MAX_INTR_EPS];
 static uint32_t intr_timeout_count[MAX_INTR_EPS];
 static uint32_t intr_error_count[MAX_INTR_EPS];
+// OUT-side diagnostics — only timeout is currently observable since out_send
+// detects only the ACTIVE-past-100ms case; halt/error decoding for completed
+// OUT QTDs would require checking before overwriting the token next call.
+static uint32_t intr_out_timeout_count[MAX_INTR_OUT_EPS];
 static uint32_t intr_poll_debug_count;
 
 // Send CLEAR_FEATURE(ENDPOINT_HALT) via fire-and-forget to clear a stalled EP.
@@ -571,6 +575,7 @@ void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
 	intr_out_transfer_active[index] = false;
 	intr_out_dev_addr[index]        = addr;
 	intr_out_ep_num[index]          = ep & 0x0F;
+	intr_out_timeout_count[index]   = 0;
 
 	if (index >= num_intr_out_eps)
 		num_intr_out_eps = index + 1;
@@ -594,6 +599,7 @@ bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t le
 				return false;
 			}
 			// Stuck QTD: clear and re-arm below
+			intr_out_timeout_count[index]++;
 			qh_intr_out[index].token = token & QTD_TOKEN_TOGGLE;
 			qh_intr_out[index].next  = QTD_TERMINATE;
 			asm volatile("dsb" ::: "memory");
