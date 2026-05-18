@@ -27,8 +27,6 @@ static uint8_t     intr_ep_num[MAX_INTR_EPS];
 static uint8_t     num_intr_eps = 0;
 static ehci_qh_t   qh_intr_out[MAX_INTR_OUT_EPS]
 	__attribute__((section(".dmabuffers"), aligned(64)));
-static ehci_qtd_t  qtd_intr_out[MAX_INTR_OUT_EPS]
-	__attribute__((section(".dmabuffers"), aligned(32)));
 static uint8_t     intr_out_buf[MAX_INTR_OUT_EPS][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 static bool        intr_out_initialized[MAX_INTR_OUT_EPS];
@@ -549,6 +547,7 @@ void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
 	if (index >= num_intr_out_eps)
 		num_intr_out_eps = index + 1;
 
+	asm volatile("dsb" ::: "memory");
 	link_periodic_schedule();  // Both IN and OUT QHs will share the periodic frame list
 }
 
