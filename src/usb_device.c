@@ -182,6 +182,16 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 		}
 		break;
 
+	case USB_DESC_BOS:
+		if (cap_desc->bos_desc_len > 0) {
+			data = cap_desc->bos_desc;
+			len  = cap_desc->bos_desc_len;
+		} else {
+			handle_passthrough(setup);
+			return;
+		}
+		break;
+
 	default:
 		handle_passthrough(setup);
 		return;
