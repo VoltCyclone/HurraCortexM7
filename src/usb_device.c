@@ -122,9 +122,15 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 
 	case USB_DESC_STRING:
 		if (desc_index == 0) {
-			static const uint8_t lang_desc[] = {0x04, 0x03, 0x09, 0x04};
-			data = lang_desc;
-			len = 4;
+			if (cap_desc->langid_desc_len > 0) {
+				data = cap_desc->langid_desc;
+				len  = cap_desc->langid_desc_len;
+			} else {
+				// Fallback: synthesize 0x0409 if capture failed.
+				static const uint8_t langid_fallback[] = {0x04, 0x03, 0x09, 0x04};
+				data = langid_fallback;
+				len  = sizeof(langid_fallback);
+			}
 		} else {
 			for (uint8_t i = 0; i < cap_desc->num_strings; i++) {
 				if (cap_desc->string_index[i] == desc_index) {
