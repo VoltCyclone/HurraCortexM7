@@ -16,11 +16,13 @@ DEFINES = -DARDUINO_TEENSY_MICROMOD -D__IMXRT1062__ -DF_CPU=816000000 \
 CFLAGS = $(MCU_FLAGS) $(DEFINES) \
          -Os -Wall -Wno-unused-variable \
          -ffunction-sections -fdata-sections \
+         -flto -fsingle-precision-constant \
          -Iinclude -Isrc
 
 LDFLAGS = $(MCU_FLAGS) \
           -Tcore/imxrt1062_mm.ld \
           -Wl,--gc-sections \
+          -flto -fuse-linker-plugin \
           --specs=nano.specs --specs=nosys.specs
 
 CORE_SRC = core/startup.c core/bootdata.c
