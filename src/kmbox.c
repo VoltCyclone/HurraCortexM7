@@ -230,11 +230,17 @@ void kmbox_init(void)
 	}
 	uint32_t sbr = UART_CLOCK / (UART_BAUD * (osr + 1));
 	if (sbr == 0) sbr = 1;
-	KM_UART_BAUD = LPUART_BAUD_OSR(osr) | LPUART_BAUD_SBR(sbr);
+	// RM §49.4.4.4: BOTHEDGE required when 4 <= OSR <= 7.
+	uint32_t baud_reg = LPUART_BAUD_OSR(osr) | LPUART_BAUD_SBR(sbr);
+	if (osr < 8) baud_reg |= LPUART_BAUD_BOTHEDGE;
+	KM_UART_BAUD = baud_reg;
 	KM_UART_CTRL = 0;
 	KM_UART_FIFO = LPUART_FIFO_RXFE | LPUART_FIFO_TXFE;
 	KM_UART_FIFO |= LPUART_FIFO_TXFLUSH | LPUART_FIFO_RXFLUSH;
-	KM_UART_WATER = LPUART_WATER_RXWATER(1);
+	// RXWATER=0: DMA fires on first received byte (lowest command latency).
+	// TXWATER=2: DMA refills when FIFO has 2 free slots (avoids underrun at
+	// high baud; FIFO depth is 4).
+	KM_UART_WATER = LPUART_WATER_RXWATER(0) | LPUART_WATER_TXWATER(2);
 
 	KM_UART_CTRL = LPUART_CTRL_TE | LPUART_CTRL_RE;
 	CCM_CCGR5 |= CCM_CCGR5_DMA(CCM_CCGR_ON);
@@ -492,11 +498,11 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 	mouse_layout.wheel_bit = 0xFFFF;
 	cached_mouse_report_len = 0;
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
-		if (desc->ifaces[i].interrupt_ep == 0) continue;
-		uint8_t ep = desc->ifaces[i].interrupt_ep & 0x0F;
+		if (desc->ifaces[i].interrupt_in_ep == 0) continue;
+		uint8_t ep = desc->ifaces[i].interrupt_in_ep & 0x0F;
 		if (desc->ifaces[i].iface_protocol == 2 && !cached_mouse_ep) {
 			cached_mouse_ep = ep;
-			cached_mouse_maxpkt = desc->ifaces[i].interrupt_maxpkt;
+			cached_mouse_maxpkt = desc->ifaces[i].interrupt_in_maxpkt;
 			parse_mouse_layout(desc->ifaces[i].hid_report_desc,
 			                   desc->ifaces[i].hid_report_desc_len);
 		} else if (desc->ifaces[i].iface_protocol == 1 && !cached_kb_ep) {
@@ -509,8 +515,14 @@ void kmbox_poll(void)
 {
 	merged_this_cycle = false;
 	tx_flush();
-	// Deferred baud change: apply only after TX DMA has finished sending response
-	if (pending_baud_rate && (KM_TX_CSR & DMA_TCD_CSR_DONE)) {
+	// Deferred baud change: apply only when TX is fully idle. We can't use
+	// CSR_DONE here — tx_flush clears it unconditionally via DMA_CDNE, so
+	// after the first poll it stays 0 until another TX *completes*. Instead
+	// check DMA_ERQ (auto-cleared on transfer completion with DREQ) plus
+	// software ring empty.
+	if (pending_baud_rate &&
+	    tx_head == tx_tail_pos &&
+	    !(DMA_ERQ & (1u << KM_TX_CH))) {
 		baud_change_apply(pending_baud_rate);
 		pending_baud_rate = 0;
 	}
@@ -820,8 +832,11 @@ static void baud_change_apply(uint32_t baud)
 	uint32_t sbr = UART_CLOCK / (baud * (osr + 1));
 	if (sbr == 0) sbr = 1;
 
-	KM_UART_BAUD = LPUART_BAUD_OSR(osr) | LPUART_BAUD_SBR(sbr)
-	             | LPUART_BAUD_RDMAE | LPUART_BAUD_TDMAE;
+	// RM §49.4.4.4: BOTHEDGE required when 4 <= OSR <= 7.
+	uint32_t baud_reg = LPUART_BAUD_OSR(osr) | LPUART_BAUD_SBR(sbr)
+	                  | LPUART_BAUD_RDMAE | LPUART_BAUD_TDMAE;
+	if (osr < 8) baud_reg |= LPUART_BAUD_BOTHEDGE;
+	KM_UART_BAUD = baud_reg;
 
 	KM_UART_CTRL |= LPUART_CTRL_TE | LPUART_CTRL_RE;
 

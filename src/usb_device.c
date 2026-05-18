@@ -19,6 +19,10 @@ static uint8_t ep0_tx_buf[512] __attribute__((section(".dmabuffers"), aligned(32
 static uint8_t ep0_rx_buf[512] __attribute__((section(".dmabuffers"), aligned(32)));
 static uint8_t int_tx_buf[MAX_INT_EPS][2][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
+static usb_dev_dtd_t dtd_int_rx[MAX_INT_OUT_EPS]
+	__attribute__((section(".dmabuffers"), aligned(32)));
+static uint8_t int_rx_buf[MAX_INT_OUT_EPS][2][64]
+	__attribute__((section(".dmabuffers"), aligned(32)));
 static const captured_descriptors_t *cap_desc;
 static usb_dev_state_t dev_state;
 static uint8_t ep_to_slot[USB_DEV_NUM_ENDPOINTS]; // EP num -> dtd/buf slot
@@ -26,13 +30,21 @@ static uint8_t num_int_eps;
 static uint8_t ep_busy_mask;     // bit set = EP has active DMA transfer in flight
 static uint8_t active_bank_mask; // bit set = EP using bank 1, clear = bank 0
 static uint8_t pending_len[USB_DEV_NUM_ENDPOINTS];  // 0 = no pending report staged
+static uint8_t ep_to_slot_out[USB_DEV_NUM_ENDPOINTS]; // OUT EP num -> slot
+static uint8_t num_int_out_eps;
+static uint8_t out_active_bank_mask;  // bit set = EP using bank 1, clear = bank 0
+static uint8_t out_pending_mask;      // bit set = EP has a completed packet waiting to be drained
+static uint16_t out_maxpkt[MAX_INT_OUT_EPS]; // wMaxPacketSize per OUT slot, clamped to buffer size
 
 static struct {
 	usb_setup_t setup;
-	uint8_t     data[64];
+	uint8_t     data[512];  // matches ep0_rx_buf so we never truncate control-OUT
 	uint16_t    data_len;
 	bool        pending;
 } deferred_out;
+
+_Static_assert(sizeof(deferred_out.data) >= sizeof(ep0_rx_buf),
+	"deferred_out.data must be >= ep0_rx_buf so handle_passthrough never silently drops control-OUT data");
 
 static volatile uint32_t *endptctrl_reg(uint8_t ep)
 {
@@ -61,6 +73,29 @@ static void prime_int_ep(uint8_t ep_num, uint8_t slot, uint8_t bank, uint16_t le
 		active_bank_mask &= ~(1 << ep_num);
 	ep_busy_mask |= (1 << ep_num);
 }
+
+// Prime an interrupt OUT endpoint to receive into the given bank buffer.
+// Caller must ensure EP is not already armed for the same bank.
+static void prime_int_out_ep(uint8_t ep_num, uint8_t slot, uint8_t bank, uint16_t maxpkt)
+{
+	uint8_t qh_idx = ep_num * 2;  // OUT (RX) side of the dQH pair
+
+	dtd_int_rx[slot].next  = DTD_TERMINATE;
+	dtd_int_rx[slot].token = DTD_ACTIVE | DTD_IOC | DTD_TOTAL_BYTES(maxpkt);
+	dtd_int_rx[slot].buffer[0] = (uint32_t)int_rx_buf[slot][bank];
+	dtd_int_rx[slot].buffer[1] = ((uint32_t)int_rx_buf[slot][bank] + 4096) & ~0xFFFu;
+
+	dqh_list[qh_idx].next  = (uint32_t)&dtd_int_rx[slot];
+	dqh_list[qh_idx].token = 0;
+	asm volatile("dsb" ::: "memory");
+
+	USB1_ENDPTPRIME = (1 << ep_num);  // RX prime bit = ep_num (no +16)
+	if (bank)
+		out_active_bank_mask |= (1 << ep_num);
+	else
+		out_active_bank_mask &= ~(1 << ep_num);
+}
+
 static void ep0_tx_data(const uint8_t *data, uint16_t len)
 {
 	if (data && len > 0) {
@@ -122,9 +157,18 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 
 	case USB_DESC_STRING:
 		if (desc_index == 0) {
-			static const uint8_t lang_desc[] = {0x04, 0x03, 0x09, 0x04};
-			data = lang_desc;
-			len = 4;
+			if (cap_desc->langid_desc_len > 0) {
+				data = cap_desc->langid_desc;
+				len  = cap_desc->langid_desc_len;
+			} else {
+				// Fallback: synthesize 0x0409 if capture failed.
+				static const uint8_t langid_fallback[] = {0x04, 0x03, 0x09, 0x04};
+				data = langid_fallback;
+				len  = sizeof(langid_fallback);
+			}
+		} else if (desc_index == 0xEE && cap_desc->ms_os_desc_len > 0) {
+			data = cap_desc->ms_os_desc;
+			len  = cap_desc->ms_os_desc_len;
 		} else {
 			for (uint8_t i = 0; i < cap_desc->num_strings; i++) {
 				if (cap_desc->string_index[i] == desc_index) {
@@ -142,7 +186,7 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 			uint16_t iface_num = setup->wIndex;
 			for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
 				if (cap_desc->ifaces[i].iface_num == iface_num &&
-				    cap_desc->ifaces[i].iface_class == 3) {
+				    cap_desc->ifaces[i].has_hid_desc) {
 					data = cap_desc->ifaces[i].hid_report_desc;
 					len = cap_desc->ifaces[i].hid_report_desc_len;
 					break;
@@ -176,8 +220,19 @@ static void handle_get_descriptor(const usb_setup_t *setup)
 		}
 		break;
 
-	default:
+	case USB_DESC_BOS:
+		if (cap_desc->bos_desc_len > 0) {
+			data = cap_desc->bos_desc;
+			len  = cap_desc->bos_desc_len;
+		} else {
+			handle_passthrough(setup);
+			return;
+		}
 		break;
+
+	default:
+		handle_passthrough(setup);
+		return;
 	}
 
 	if (data == NULL || len == 0) {
@@ -209,9 +264,9 @@ static void configure_all_interrupt_endpoints(void)
 
 	for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
 		const captured_iface_t *iface = &cap_desc->ifaces[i];
-		if (iface->interrupt_ep == 0) continue;
+		if (iface->interrupt_in_ep == 0) continue;
 
-		uint8_t ep_num = iface->interrupt_ep & 0x0F;
+		uint8_t ep_num = iface->interrupt_in_ep & 0x0F;
 		if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
 		if (num_int_eps >= MAX_INT_EPS) break;
 
@@ -221,7 +276,7 @@ static void configure_all_interrupt_endpoints(void)
 		uint8_t slot = num_int_eps++;
 		ep_to_slot[ep_num] = slot;
 
-		uint16_t maxpkt = iface->interrupt_maxpkt;
+		uint16_t maxpkt = iface->interrupt_in_maxpkt;
 		uint8_t qh_idx = ep_num * 2 + 1;
 
 		memset(&dqh_list[qh_idx], 0, sizeof(usb_dev_dqh_t));
@@ -234,6 +289,50 @@ static void configure_all_interrupt_endpoints(void)
 	}
 }
 
+static void configure_all_interrupt_out_endpoints(void)
+{
+	num_int_out_eps = 0;
+	memset(ep_to_slot_out, 0xFF, sizeof(ep_to_slot_out));
+	out_active_bank_mask = 0;
+	out_pending_mask = 0;
+
+	for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
+		const captured_iface_t *iface = &cap_desc->ifaces[i];
+		uint8_t ep_addr = iface->interrupt_out_ep;
+		if (ep_addr == 0) continue;
+
+		uint8_t ep_num = ep_addr & 0x0F;
+		if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
+		if (num_int_out_eps >= MAX_INT_OUT_EPS) break;
+
+		// Check for slot collision (same EP number already mapped)
+		if (ep_to_slot_out[ep_num] != 0xFF) continue;
+
+		uint8_t slot = num_int_out_eps++;
+		ep_to_slot_out[ep_num] = slot;
+
+		uint16_t maxpkt = iface->interrupt_out_maxpkt;
+		if (maxpkt > sizeof(int_rx_buf[0][0])) maxpkt = sizeof(int_rx_buf[0][0]);
+		out_maxpkt[slot] = maxpkt;
+
+		// Configure OUT dQH (qh_idx = ep_num * 2, RX side)
+		uint8_t qh_idx = ep_num * 2;
+		memset(&dqh_list[qh_idx], 0, sizeof(usb_dev_dqh_t));
+		dqh_list[qh_idx].config = DQH_MAX_PACKET(maxpkt) | DQH_ZLT_DISABLE;
+		dqh_list[qh_idx].next = DTD_TERMINATE;
+		asm volatile("dsb" ::: "memory");
+
+		// ENDPTCTRL: enable RX, RX type = interrupt, reset RX toggle.
+		// Mirror IN-side pattern (TXE | TXT(3) | TXR) on the RX half.
+		// Use |= to preserve any TX bits already set for the same EP number.
+		volatile uint32_t *epctrl = endptctrl_reg(ep_num);
+		*epctrl |= USB_ENDPTCTRL_RXE | USB_ENDPTCTRL_RXT(3) | USB_ENDPTCTRL_RXR;
+
+		// Prime initial RX into bank 0
+		prime_int_out_ep(ep_num, slot, 0, maxpkt);
+	}
+}
+
 static void handle_set_configuration(const usb_setup_t *setup)
 {
 	uint8_t config_val = setup->wValue & 0xFF;
@@ -241,7 +340,7 @@ static void handle_set_configuration(const usb_setup_t *setup)
 	if (config_val == 0) {
 		dev_state = USB_DEV_STATE_ADDRESS;
 		for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
-			uint8_t ep_num = cap_desc->ifaces[i].interrupt_ep & 0x0F;
+			uint8_t ep_num = cap_desc->ifaces[i].interrupt_in_ep & 0x0F;
 			if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
 			USB1_ENDPTFLUSH = (1 << (16 + ep_num));
 			while (USB1_ENDPTFLUSH) ;
@@ -251,8 +350,27 @@ static void handle_set_configuration(const usb_setup_t *setup)
 		num_int_eps = 0;
 		memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
 		ep_busy_mask = 0;
+
+		// OUT-side teardown: mirror the IN loop above. ENDPTFLUSH RX bits
+		// live in the low 16; clear only RX bits in ENDPTCTRL via AND-NOT
+		// so any TX bits set for a shared EP number are preserved (the
+		// IN loop above will have zeroed shared EP numbers already; this
+		// pattern stays defensive for OUT-only EP numbers).
+		for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
+			uint8_t ep_num = cap_desc->ifaces[i].interrupt_out_ep & 0x0F;
+			if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
+			USB1_ENDPTFLUSH = (1 << ep_num);
+			while (USB1_ENDPTFLUSH) ;
+			volatile uint32_t *epctrl = endptctrl_reg(ep_num);
+			*epctrl &= ~(USB_ENDPTCTRL_RXE | USB_ENDPTCTRL_RXT(3) | USB_ENDPTCTRL_RXR);
+		}
+		num_int_out_eps = 0;
+		memset(ep_to_slot_out, 0xFF, sizeof(ep_to_slot_out));
+		out_active_bank_mask = 0;
+		out_pending_mask = 0;
 	} else {
 		configure_all_interrupt_endpoints();
+		configure_all_interrupt_out_endpoints();
 		dev_state = USB_DEV_STATE_CONFIGURED;
 	}
 
@@ -310,34 +428,14 @@ static void handle_standard_request(const usb_setup_t *setup)
 
 static void handle_class_request(const usb_setup_t *setup)
 {
-	switch (setup->bRequest) {
-	case 0x0A: // SET_IDLE
-		ep0_tx_data(NULL, 0);
-		break;
-	case 0x0B: // SET_PROTOCOL
-		ep0_tx_data(NULL, 0);
-		break;
-	case 0x01: // GET_REPORT — return zeros (real data flows via interrupt EPs)
-		{
-			uint16_t len = setup->wLength;
-			if (len > sizeof(ep0_tx_buf)) len = sizeof(ep0_tx_buf);
-			memset(ep0_tx_buf, 0, len);
-			ep0_tx_data(ep0_tx_buf, len);
-		}
-		break;
-	case 0x09: // SET_REPORT — forward to real device (LED control, etc.)
-		handle_passthrough(setup);
-		return;
-	case 0x03: // GET_PROTOCOL
-		{
-			static const uint8_t proto = 1; // Report protocol
-			ep0_tx_data(&proto, 1);
-		}
-		break;
-	default:
-		ep0_stall();
-		break;
-	}
+	// Forward every class request to the upstream device. handle_passthrough()
+	// handles IN (synchronous round-trip), OUT-with-data (receive → ACK → defer
+	// forward), and OUT-no-data (ACK → defer forward) directions automatically.
+	//
+	// Previously we answered five of six HID class requests locally with stub
+	// data (GET_REPORT → zeros, GET_PROTOCOL → 1, SET_IDLE/SET_PROTOCOL → ACK,
+	// GET_IDLE → STALL because missing from switch). All five are now forwarded.
+	handle_passthrough(setup);
 }
 // Blocking receive of EP0 OUT data phase (for control transfers with host-to-device data).
 // Returns bytes received, or -1 on error/timeout.
@@ -463,6 +561,13 @@ static void handle_bus_reset(void)
 	memset(pending_len, 0, sizeof(pending_len));
 	num_int_eps = 0;
 	memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
+
+	// OUT bookkeeping mirror. Global ENDPTFLUSH above already cleared HW
+	// state for both TX and RX, so only software state needs resetting.
+	num_int_out_eps = 0;
+	out_active_bank_mask = 0;
+	out_pending_mask = 0;
+	memset(ep_to_slot_out, 0xFF, sizeof(ep_to_slot_out));
 }
 bool usb_device_init(const captured_descriptors_t *desc)
 {
@@ -567,6 +672,39 @@ bool usb_device_send_report(uint8_t ep_num, const uint8_t *data, uint16_t len)
 	memcpy(int_tx_buf[slot][bank], data, len);
 	prime_int_ep(ep_num, slot, bank, len);
 	return true;
+}
+
+int usb_device_poll_out(uint8_t ep_num, uint8_t **data_ptr)
+{
+	if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) return -1;
+	uint8_t slot = ep_to_slot_out[ep_num];
+	if (slot == 0xFF) return -1;  // EP not configured for OUT
+
+	uint32_t token = dtd_int_rx[slot].token;
+	if (token & DTD_ACTIVE) {
+		return 0;  // Still receiving
+	}
+	uint16_t maxpkt = out_maxpkt[slot];
+	if (token & (DTD_HALTED | DTD_BUFFER_ERR | DTD_XACT_ERR)) {
+		// Error — re-prime on the same bank and report none
+		uint8_t bank = (out_active_bank_mask >> ep_num) & 1;
+		prime_int_out_ep(ep_num, slot, bank, maxpkt);
+		return 0;
+	}
+
+	uint8_t completed_bank = (out_active_bank_mask >> ep_num) & 1;
+	uint32_t remaining = (token >> 16) & 0x7FFF;
+	uint16_t got = (uint16_t)(maxpkt - remaining);
+
+	// Hand caller a pointer to the completed bank
+	*data_ptr = int_rx_buf[slot][completed_bank];
+
+	// Re-prime on the other bank so the next packet can land while caller
+	// is forwarding this one upstream.
+	uint8_t next_bank = completed_bank ^ 1;
+	prime_int_out_ep(ep_num, slot, next_bank, maxpkt);
+
+	return (int)got;
 }
 
 bool usb_device_is_configured(void)

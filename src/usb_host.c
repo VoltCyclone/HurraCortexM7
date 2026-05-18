@@ -15,8 +15,6 @@ static usb_setup_t setup_buf  __attribute__((section(".dmabuffers"), aligned(32)
 static uint8_t     xfer_buf[2048] __attribute__((section(".dmabuffers"), aligned(32)));
 static ehci_qh_t   qh_intr[MAX_INTR_EPS]
 	__attribute__((section(".dmabuffers"), aligned(64)));
-static ehci_qtd_t  qtd_intr[MAX_INTR_EPS]
-	__attribute__((section(".dmabuffers"), aligned(32)));
 static uint8_t     intr_buf[MAX_INTR_EPS][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 static bool        intr_initialized[MAX_INTR_EPS];
@@ -25,6 +23,16 @@ static uint32_t    intr_prime_time[MAX_INTR_EPS];
 static uint8_t     intr_dev_addr[MAX_INTR_EPS];
 static uint8_t     intr_ep_num[MAX_INTR_EPS];
 static uint8_t     num_intr_eps = 0;
+static ehci_qh_t   qh_intr_out[MAX_INTR_OUT_EPS]
+	__attribute__((section(".dmabuffers"), aligned(64)));
+static uint8_t     intr_out_buf[MAX_INTR_OUT_EPS][64]
+	__attribute__((section(".dmabuffers"), aligned(32)));
+static bool        intr_out_initialized[MAX_INTR_OUT_EPS];
+static bool        intr_out_transfer_active[MAX_INTR_OUT_EPS];
+static uint32_t    intr_out_prime_time[MAX_INTR_OUT_EPS];
+static uint8_t     intr_out_dev_addr[MAX_INTR_OUT_EPS];
+static uint8_t     intr_out_ep_num[MAX_INTR_OUT_EPS];
+static uint8_t     num_intr_out_eps = 0;
 static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned(4096)));
 
 static uint8_t device_speed = USB_SPEED_FULL;
@@ -222,6 +230,11 @@ static int execute_transfer(uint32_t timeout_ms)
 		if ((millis() - start) > timeout_ms) {
 			return -1;
 		}
+
+		// Sleep until USB completion ISR (or any other event) wakes us.
+		// SEVONPEND + USBINTR_UE means a completed transfer raises SEV
+		// without re-entering the ISR; the qTD tokens are checked above.
+		__asm volatile("wfe");
 	}
 }
 
@@ -374,9 +387,21 @@ bool usb_host_control_async_busy(void)
 
 static void link_periodic_schedule(void)
 {
+	// Find the first initialized OUT slot — used as the "next" pointer
+	// when an IN slot is the last initialized IN, but OUT slots exist.
+	uint32_t first_out_link = 0x01; // T-bit by default
+	for (uint8_t i = 0; i < num_intr_out_eps; i++) {
+		if (intr_out_initialized[i]) {
+			first_out_link = (uint32_t)&qh_intr_out[i] | 0x02;
+			break;
+		}
+	}
+
+	// Chain IN slots — each points to the next initialized IN, or to the
+	// first initialized OUT if no more IN, or terminates.
 	for (uint8_t i = 0; i < num_intr_eps; i++) {
 		if (!intr_initialized[i]) continue;
-		uint32_t next_link = 0x01; // T-bit: terminate
+		uint32_t next_link = first_out_link;
 		for (uint8_t j = i + 1; j < num_intr_eps; j++) {
 			if (intr_initialized[j]) {
 				next_link = (uint32_t)&qh_intr[j] | 0x02; // type=QH
@@ -385,12 +410,30 @@ static void link_periodic_schedule(void)
 		}
 		qh_intr[i].horizontal_link = next_link;
 	}
-	uint32_t head = 0x01; // T-bit if none
+
+	// Chain OUT slots — each points to the next initialized OUT or terminates.
+	for (uint8_t i = 0; i < num_intr_out_eps; i++) {
+		if (!intr_out_initialized[i]) continue;
+		uint32_t next_link = 0x01; // T-bit: terminate
+		for (uint8_t j = i + 1; j < num_intr_out_eps; j++) {
+			if (intr_out_initialized[j]) {
+				next_link = (uint32_t)&qh_intr_out[j] | 0x02;
+				break;
+			}
+		}
+		qh_intr_out[i].horizontal_link = next_link;
+	}
+
+	// Chain head: first IN if any, else first OUT if any, else terminate.
+	uint32_t head = 0x01;
 	for (uint8_t i = 0; i < num_intr_eps; i++) {
 		if (intr_initialized[i]) {
-			head = (uint32_t)&qh_intr[i] | 0x02; // type=QH
+			head = (uint32_t)&qh_intr[i] | 0x02;
 			break;
 		}
+	}
+	if (head == 0x01) {
+		head = first_out_link;
 	}
 
 	for (int i = 0; i < 32; i++) {
@@ -402,6 +445,10 @@ static void link_periodic_schedule(void)
 static uint32_t intr_halt_count[MAX_INTR_EPS];
 static uint32_t intr_timeout_count[MAX_INTR_EPS];
 static uint32_t intr_error_count[MAX_INTR_EPS];
+// OUT-side diagnostics — only timeout is currently observable since out_send
+// detects only the ACTIVE-past-100ms case; halt/error decoding for completed
+// OUT QTDs would require checking before overwriting the token next call.
+static uint32_t intr_out_timeout_count[MAX_INTR_OUT_EPS];
 static uint32_t intr_poll_debug_count;
 
 // Send CLEAR_FEATURE(ENDPOINT_HALT) via fire-and-forget to clear a stalled EP.
@@ -501,6 +548,93 @@ void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
 		num_intr_eps = index + 1;
 
 	link_periodic_schedule();
+}
+
+void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
+	uint16_t maxpkt)
+{
+	if (index >= MAX_INTR_OUT_EPS) return;
+
+	ehci_qh_t *qh = &qh_intr_out[index];
+	memset(qh, 0, sizeof(*qh));
+	uint32_t cap0 = 0;
+	cap0 |= ((uint32_t)maxpkt << 16);
+	cap0 |= ((uint32_t)device_speed << 12);
+	cap0 |= ((uint32_t)(ep & 0x0F) << 8);
+	cap0 |= addr;
+	qh->capabilities[0] = cap0;
+	uint32_t cap1 = (1 << 30); // Mult = 1
+	if (device_speed == USB_SPEED_HIGH) {
+		cap1 |= 0xFF;          // S-mask: all µFrames
+	} else {
+		cap1 |= 0x01;          // S-mask: start-split in µFrame 0
+		cap1 |= (0x1C << 8);   // C-mask: complete-split in µFrames 2,3,4
+	}
+	qh->capabilities[1] = cap1;
+
+	qh->next = QTD_TERMINATE;
+	qh->alt_next = QTD_TERMINATE;
+	qh->token = 0;
+
+	intr_out_initialized[index]     = true;
+	intr_out_transfer_active[index] = false;
+	intr_out_dev_addr[index]        = addr;
+	intr_out_ep_num[index]          = ep & 0x0F;
+	intr_out_timeout_count[index]   = 0;
+
+	if (index >= num_intr_out_eps)
+		num_intr_out_eps = index + 1;
+
+	asm volatile("dsb" ::: "memory");
+	link_periodic_schedule();  // Both IN and OUT QHs will share the periodic frame list
+}
+
+bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t len)
+{
+	if (index >= MAX_INTR_OUT_EPS || !intr_out_initialized[index]) return false;
+	if (len > sizeof(intr_out_buf[0])) return false;
+
+	// Check whether the previous QTD has completed; if still active, refuse —
+	// caller must drain before sending the next packet.
+	if (intr_out_transfer_active[index]) {
+		uint32_t token = qh_intr_out[index].token;
+		if (token & QTD_TOKEN_ACTIVE) {
+			// Still in flight — bail unless we've been waiting too long
+			if ((millis() - intr_out_prime_time[index]) <= 100) {
+				return false;
+			}
+			// Stuck QTD: clear and re-arm below
+			intr_out_timeout_count[index]++;
+			qh_intr_out[index].token = token & QTD_TOKEN_TOGGLE;
+			qh_intr_out[index].next  = QTD_TERMINATE;
+			asm volatile("dsb" ::: "memory");
+		}
+		intr_out_transfer_active[index] = false;
+	}
+
+	ehci_qh_t *qh = &qh_intr_out[index];
+	uint8_t *buf  = intr_out_buf[index];
+	memcpy(buf, data, len);
+
+	uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;
+	qh->next     = QTD_TERMINATE;
+	qh->alt_next = QTD_TERMINATE;
+	qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_OUT |
+		QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
+	{
+		uint32_t a = (uint32_t)buf;
+		qh->buffer[0] = a;
+		a &= 0xFFFFF000;
+		qh->buffer[1] = a + 0x1000;
+		qh->buffer[2] = a + 0x2000;
+		qh->buffer[3] = a + 0x3000;
+		qh->buffer[4] = a + 0x4000;
+	}
+	asm volatile("dsb" ::: "memory");
+
+	intr_out_transfer_active[index] = true;
+	intr_out_prime_time[index]      = millis();
+	return true;
 }
 
 void usb_host_interrupt_dump_state(void)

@@ -91,6 +91,11 @@ static struct {
 	float   fitts_a;
 	float   fitts_b;
 
+	// Easing curve — precomputed; only changes when humanize toggles
+	float   attack_frac;
+	float   inv_attack_frac;
+	float   inv_tail;
+
 	float   last_noise_vx;
 	float   last_noise_vy;
 
@@ -133,6 +138,17 @@ static inline float smooth_rand_uniform(void)
 {
 	return sfc32_uniform(&state.rng_a, &state.rng_b, &state.rng_c,
 		&state.rng_counter);
+}
+
+static void recompute_easing(void)
+{
+	float overshoot = state.humanize ? state.overshoot_bias : 0.0f;
+	float af = SMOOTH_EASE_ATTACK_FRAC + overshoot;
+	if (af < 0.05f) af = 0.05f;
+	if (af > 0.95f) af = 0.95f;
+	state.attack_frac     = af;
+	state.inv_attack_frac = 1.0f / af;
+	state.inv_tail        = 1.0f / (1.0f - af);
 }
 
 static uint8_t compute_spread_frames(int32_t abs_x_fp, int32_t abs_y_fp)
@@ -257,6 +273,8 @@ void smooth_init(uint32_t interval_us)
 	state.fitts_b = SMOOTH_FITTS_B_MIN
 		+ fabsf(sfc32_uniform(&p_a, &p_b, &p_c, &p_ctr)) * SMOOTH_FITTS_B_SPAN;
 
+	recompute_easing();
+
 	// Scale EWMA alpha to tick rate
 	{
 		float exponent = (float)state.interval_us / 1000.0f;
@@ -337,12 +355,11 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 	float frame_speed_gain = 0.0f;
 	float total_weight = 0.0f;
 
-	float overshoot = state.humanize ? state.overshoot_bias : 0.0f;
-	float attack_frac = SMOOTH_EASE_ATTACK_FRAC + overshoot;
-	if (attack_frac < 0.05f) attack_frac = 0.05f;
-	if (attack_frac > 0.95f) attack_frac = 0.95f;
-	float inv_attack_frac = 1.0f / attack_frac;
-	float inv_tail        = 1.0f / (1.0f - attack_frac);
+	// Easing constants are precomputed in smooth_init / smooth_set_humanize —
+	// overshoot_bias is session-constant.
+	float attack_frac     = state.attack_frac;
+	float inv_attack_frac = state.inv_attack_frac;
+	float inv_tail        = state.inv_tail;
 
 	uint32_t active = ~state.free_mask & ((SMOOTH_QUEUE_SIZE == 32)
 		? 0xFFFFFFFFu : ((1u << SMOOTH_QUEUE_SIZE) - 1u));
@@ -548,6 +565,7 @@ void smooth_set_max_per_frame(int16_t max)
 void smooth_set_humanize(bool enabled)
 {
 	state.humanize = enabled;
+	recompute_easing();
 }
 
 static inline uint32_t timing_lfsr_next(void)

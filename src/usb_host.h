@@ -35,6 +35,7 @@ typedef struct __attribute__((packed)) {
 #define USB_DESC_STRING         3
 #define USB_DESC_INTERFACE      4
 #define USB_DESC_ENDPOINT       5
+#define USB_DESC_BOS            0x0F
 #define USB_DESC_HID            0x21
 #define USB_DESC_HID_REPORT     0x22
 #define QTD_TOKEN_ACTIVE     (1 << 7)
@@ -69,7 +70,7 @@ void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
 	const usb_setup_t *setup, uint8_t *data);
 bool usb_host_control_async_busy(void);
 
-#define MAX_INTR_EPS 4
+#define MAX_INTR_EPS 7
 
 void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
 	uint16_t maxpkt);
@@ -78,3 +79,11 @@ int usb_host_interrupt_poll(uint8_t index, uint8_t *data, uint16_t len);
 // Caller must finish reading/modifying before calling poll again on this index.
 int usb_host_interrupt_poll_zerocopy(uint8_t index, uint8_t **data_ptr, uint16_t len);
 void usb_host_interrupt_dump_state(void);
+
+#define MAX_INTR_OUT_EPS 7
+
+void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
+	uint16_t maxpkt);
+// Returns true if the send was armed (QTD primed). Returns false if a previous
+// send on this slot is still in flight — caller should retry next poll cycle.
+bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t len);
