@@ -29,7 +29,7 @@ static uint8_t pending_len[USB_DEV_NUM_ENDPOINTS];  // 0 = no pending report sta
 
 static struct {
 	usb_setup_t setup;
-	uint8_t     data[64];
+	uint8_t     data[512];  // matches ep0_rx_buf so we never truncate control-OUT
 	uint16_t    data_len;
 	bool        pending;
 } deferred_out;
