@@ -15,8 +15,6 @@ static usb_setup_t setup_buf  __attribute__((section(".dmabuffers"), aligned(32)
 static uint8_t     xfer_buf[2048] __attribute__((section(".dmabuffers"), aligned(32)));
 static ehci_qh_t   qh_intr[MAX_INTR_EPS]
 	__attribute__((section(".dmabuffers"), aligned(64)));
-static ehci_qtd_t  qtd_intr[MAX_INTR_EPS]
-	__attribute__((section(".dmabuffers"), aligned(32)));
 static uint8_t     intr_buf[MAX_INTR_EPS][64]
 	__attribute__((section(".dmabuffers"), aligned(32)));
 static bool        intr_initialized[MAX_INTR_EPS];
