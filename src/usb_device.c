@@ -42,6 +42,9 @@ static struct {
 	bool        pending;
 } deferred_out;
 
+_Static_assert(sizeof(deferred_out.data) >= sizeof(ep0_rx_buf),
+	"deferred_out.data must be >= ep0_rx_buf so handle_passthrough never silently drops control-OUT data");
+
 static volatile uint32_t *endptctrl_reg(uint8_t ep)
 {
 	// ENDPTCTRL0-7 at offset 0x1C0 + ep*4
