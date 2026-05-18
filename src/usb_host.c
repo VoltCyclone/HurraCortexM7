@@ -230,6 +230,11 @@ static int execute_transfer(uint32_t timeout_ms)
 		if ((millis() - start) > timeout_ms) {
 			return -1;
 		}
+
+		// Sleep until USB completion ISR (or any other event) wakes us.
+		// SEVONPEND + USBINTR_UE means a completed transfer raises SEV
+		// without re-entering the ISR; the qTD tokens are checked above.
+		__asm volatile("wfe");
 	}
 }
 
