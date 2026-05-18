@@ -345,6 +345,24 @@ static void handle_set_configuration(const usb_setup_t *setup)
 		num_int_eps = 0;
 		memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
 		ep_busy_mask = 0;
+
+		// OUT-side teardown: mirror the IN loop above. ENDPTFLUSH RX bits
+		// live in the low 16; clear only RX bits in ENDPTCTRL via AND-NOT
+		// so any TX bits set for a shared EP number are preserved (the
+		// IN loop above will have zeroed shared EP numbers already; this
+		// pattern stays defensive for OUT-only EP numbers).
+		for (uint8_t i = 0; i < cap_desc->num_ifaces; i++) {
+			uint8_t ep_num = cap_desc->ifaces[i].interrupt_out_ep & 0x0F;
+			if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) continue;
+			USB1_ENDPTFLUSH = (1 << ep_num);
+			while (USB1_ENDPTFLUSH) ;
+			volatile uint32_t *epctrl = endptctrl_reg(ep_num);
+			*epctrl &= ~(USB_ENDPTCTRL_RXE | USB_ENDPTCTRL_RXT(3) | USB_ENDPTCTRL_RXR);
+		}
+		num_int_out_eps = 0;
+		memset(ep_to_slot_out, 0xFF, sizeof(ep_to_slot_out));
+		out_active_bank_mask = 0;
+		out_pending_mask = 0;
 	} else {
 		configure_all_interrupt_endpoints();
 		configure_all_interrupt_out_endpoints();
@@ -538,6 +556,13 @@ static void handle_bus_reset(void)
 	memset(pending_len, 0, sizeof(pending_len));
 	num_int_eps = 0;
 	memset(ep_to_slot, 0xFF, sizeof(ep_to_slot));
+
+	// OUT bookkeeping mirror. Global ENDPTFLUSH above already cleared HW
+	// state for both TX and RX, so only software state needs resetting.
+	num_int_out_eps = 0;
+	out_active_bank_mask = 0;
+	out_pending_mask = 0;
+	memset(ep_to_slot_out, 0xFF, sizeof(ep_to_slot_out));
 }
 bool usb_device_init(const captured_descriptors_t *desc)
 {
