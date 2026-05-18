@@ -56,23 +56,23 @@ static bool parse_config_descriptor(captured_descriptors_t *desc)
 			if (desc->num_ifaces < MAX_INTERFACES) {
 				cur_iface = &desc->ifaces[desc->num_ifaces++];
 				memset(cur_iface, 0, sizeof(*cur_iface));
-				cur_iface->iface_num      = p[2];
-				cur_iface->iface_class    = p[5];
-				cur_iface->iface_subclass = p[6];
-				cur_iface->iface_protocol = p[7];
+				cur_iface->iface_num        = p[2];
+				cur_iface->iface_class      = p[5];
+				cur_iface->iface_subclass   = p[6];
+				cur_iface->iface_protocol   = p[7];
+				cur_iface->iface_string_idx = p[8];  // iInterface
 			} else {
 				cur_iface = NULL;
 			}
 		} else if (dtype == USB_DESC_HID && dlen >= 9 && cur_iface != NULL) {
-			if (cur_iface->iface_class == 3) {
-				uint8_t num_descs = p[5];
-				for (uint8_t i = 0; i < num_descs; i++) {
-					if (6 + i * 3 + 2 < dlen) {
-						uint8_t rtype = p[6 + i * 3];
-						uint16_t rlen = p[7 + i * 3] | (p[8 + i * 3] << 8);
-						if (rtype == USB_DESC_HID_REPORT) {
-							cur_iface->hid_report_desc_len = rlen;
-						}
+			cur_iface->has_hid_desc = true;
+			uint8_t num_descs = p[5];
+			for (uint8_t i = 0; i < num_descs; i++) {
+				if (6 + i * 3 + 2 < dlen) {
+					uint8_t rtype = p[6 + i * 3];
+					uint16_t rlen = p[7 + i * 3] | (p[8 + i * 3] << 8);
+					if (rtype == USB_DESC_HID_REPORT) {
+						cur_iface->hid_report_desc_len = rlen;
 					}
 				}
 			}
@@ -148,7 +148,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 	parse_config_descriptor(desc);
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
 		captured_iface_t *iface = &desc->ifaces[i];
-		if (iface->iface_class != 3) continue;
+		if (!iface->has_hid_desc) continue;
 		if (iface->hid_report_desc_len == 0) continue;
 
 		uint16_t rdlen = iface->hid_report_desc_len;
@@ -207,7 +207,7 @@ bool capture_descriptors(captured_descriptors_t *desc)
 
 	// SET_IDLE for each HID interface — report only on change
 	for (uint8_t i = 0; i < desc->num_ifaces; i++) {
-		if (desc->ifaces[i].iface_class != 3) continue;
+		if (!desc->ifaces[i].has_hid_desc) continue;
 		setup.bmRequestType = 0x21; // Host-to-Device, Class, Interface
 		setup.bRequest = 0x0A;      // HID SET_IDLE
 		setup.wValue = 0;           // duration=0, report_id=0
