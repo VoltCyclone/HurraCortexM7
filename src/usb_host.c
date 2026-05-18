@@ -384,9 +384,21 @@ bool usb_host_control_async_busy(void)
 
 static void link_periodic_schedule(void)
 {
+	// Find the first initialized OUT slot — used as the "next" pointer
+	// when an IN slot is the last initialized IN, but OUT slots exist.
+	uint32_t first_out_link = 0x01; // T-bit by default
+	for (uint8_t i = 0; i < num_intr_out_eps; i++) {
+		if (intr_out_initialized[i]) {
+			first_out_link = (uint32_t)&qh_intr_out[i] | 0x02;
+			break;
+		}
+	}
+
+	// Chain IN slots — each points to the next initialized IN, or to the
+	// first initialized OUT if no more IN, or terminates.
 	for (uint8_t i = 0; i < num_intr_eps; i++) {
 		if (!intr_initialized[i]) continue;
-		uint32_t next_link = 0x01; // T-bit: terminate
+		uint32_t next_link = first_out_link;
 		for (uint8_t j = i + 1; j < num_intr_eps; j++) {
 			if (intr_initialized[j]) {
 				next_link = (uint32_t)&qh_intr[j] | 0x02; // type=QH
@@ -395,12 +407,30 @@ static void link_periodic_schedule(void)
 		}
 		qh_intr[i].horizontal_link = next_link;
 	}
-	uint32_t head = 0x01; // T-bit if none
+
+	// Chain OUT slots — each points to the next initialized OUT or terminates.
+	for (uint8_t i = 0; i < num_intr_out_eps; i++) {
+		if (!intr_out_initialized[i]) continue;
+		uint32_t next_link = 0x01; // T-bit: terminate
+		for (uint8_t j = i + 1; j < num_intr_out_eps; j++) {
+			if (intr_out_initialized[j]) {
+				next_link = (uint32_t)&qh_intr_out[j] | 0x02;
+				break;
+			}
+		}
+		qh_intr_out[i].horizontal_link = next_link;
+	}
+
+	// Chain head: first IN if any, else first OUT if any, else terminate.
+	uint32_t head = 0x01;
 	for (uint8_t i = 0; i < num_intr_eps; i++) {
 		if (intr_initialized[i]) {
-			head = (uint32_t)&qh_intr[i] | 0x02; // type=QH
+			head = (uint32_t)&qh_intr[i] | 0x02;
 			break;
 		}
+	}
+	if (head == 0x01) {
+		head = first_out_link;
 	}
 
 	for (int i = 0; i < 32; i++) {
