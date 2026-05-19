@@ -37,6 +37,30 @@ static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned
 
 static uint8_t device_speed = USB_SPEED_FULL;
 
+// EHCI qTD/QH buffer-page-cross writes. Length-bounded variants — see
+// usb_host.c performance design notes. Both setup_buf and xfer_buf are
+// aligned(32) in .dmabuffers, so for any transfer with len <= 64 the
+// worst-case reach (0xFE0 + 64 = 0x1040) cannot cross into buffer[2];
+// for len <= 2048 the worst-case reach (0xFE0 + 2048 = 0x17E0) cannot
+// cross into buffer[3].
+static __attribute__((always_inline)) inline void
+set_qtd_buffers_small(volatile uint32_t *b, const void *buf)
+{
+	uint32_t a = (uint32_t)buf;
+	b[0] = a;
+	b[1] = (a & 0xFFFFF000u) + 0x1000u;
+}
+
+static __attribute__((always_inline)) inline void
+set_qtd_buffers_medium(volatile uint32_t *b, const void *buf)
+{
+	uint32_t a = (uint32_t)buf;
+	b[0] = a;
+	a &= 0xFFFFF000u;
+	b[1] = a + 0x1000u;
+	b[2] = a + 0x2000u;
+}
+
 static void usb2_isr(void)
 {
 	USB2_USBSTS = USB2_USBSTS; // W1C all pending status bits
@@ -249,15 +273,7 @@ int usb_host_control_transfer(uint8_t addr, uint8_t maxpkt,
 	qtd_setup.alt_next = QTD_TERMINATE;
 	qtd_setup.token = QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_SETUP |
 		QTD_TOKEN_NBYTES(8) | QTD_TOKEN_CERR(3);
-	{
-		uint32_t addr = (uint32_t)&setup_buf;
-		qtd_setup.buffer[0] = addr;
-		addr &= 0xFFFFF000;
-		qtd_setup.buffer[1] = addr + 0x1000;
-		qtd_setup.buffer[2] = addr + 0x2000;
-		qtd_setup.buffer[3] = addr + 0x3000;
-		qtd_setup.buffer[4] = addr + 0x4000;
-	}
+	set_qtd_buffers_small(qtd_setup.buffer, &setup_buf);
 
 	if (wLength > 0) {
 		memset(&qtd_data, 0, sizeof(qtd_data));
@@ -270,15 +286,7 @@ int usb_host_control_transfer(uint8_t addr, uint8_t maxpkt,
 		} else {
 			memcpy(xfer_buf, data, wLength);
 		}
-		{
-			uint32_t addr = (uint32_t)xfer_buf;
-			qtd_data.buffer[0] = addr;
-			addr &= 0xFFFFF000;
-			qtd_data.buffer[1] = addr + 0x1000;
-			qtd_data.buffer[2] = addr + 0x2000;
-			qtd_data.buffer[3] = addr + 0x3000;
-			qtd_data.buffer[4] = addr + 0x4000;
-		}
+		set_qtd_buffers_medium(qtd_data.buffer, xfer_buf);
 
 		memset(&qtd_status, 0, sizeof(qtd_status));
 		qtd_status.next = QTD_TERMINATE;
@@ -325,15 +333,7 @@ void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
 	qtd_setup.alt_next = QTD_TERMINATE;
 	qtd_setup.token = QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_SETUP |
 		QTD_TOKEN_NBYTES(8) | QTD_TOKEN_CERR(3);
-	{
-		uint32_t a = (uint32_t)&setup_buf;
-		qtd_setup.buffer[0] = a;
-		a &= 0xFFFFF000;
-		qtd_setup.buffer[1] = a + 0x1000;
-		qtd_setup.buffer[2] = a + 0x2000;
-		qtd_setup.buffer[3] = a + 0x3000;
-		qtd_setup.buffer[4] = a + 0x4000;
-	}
+	set_qtd_buffers_small(qtd_setup.buffer, &setup_buf);
 
 	if (wLength > 0 && data) {
 		memset(&qtd_data, 0, sizeof(qtd_data));
@@ -342,12 +342,7 @@ void usb_host_control_transfer_fire(uint8_t addr, uint8_t maxpkt,
 			QTD_TOKEN_NBYTES(wLength) | QTD_TOKEN_CERR(3) |
 			QTD_TOKEN_PID_OUT;
 		memcpy(xfer_buf, data, wLength);
-		{
-			uint32_t a = (uint32_t)xfer_buf;
-			qtd_data.buffer[0] = a;
-			a &= 0xFFFFF000;
-			qtd_data.buffer[1] = a + 0x1000;
-		}
+		set_qtd_buffers_medium(qtd_data.buffer, xfer_buf);
 
 		memset(&qtd_status, 0, sizeof(qtd_status));
 		qtd_status.next = QTD_TERMINATE;
@@ -469,6 +464,7 @@ static void intr_clear_halt(uint8_t index)
 
 // Recover a halted periodic QH: disable S-mask to prevent HC access,
 // clear halt, re-prime transfer, then restore S-mask.
+__attribute__((cold, noinline))
 static void intr_halt_recover(uint8_t index, uint16_t len)
 {
 	ehci_qh_t *qh = &qh_intr[index];
@@ -487,15 +483,7 @@ static void intr_halt_recover(uint8_t index, uint16_t len)
 	qh->alt_next = QTD_TERMINATE;
 	qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
 		QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-	{
-		uint32_t a = (uint32_t)buf;
-		qh->buffer[0] = a;
-		a &= 0xFFFFF000;
-		qh->buffer[1] = a + 0x1000;
-		qh->buffer[2] = a + 0x2000;
-		qh->buffer[3] = a + 0x3000;
-		qh->buffer[4] = a + 0x4000;
-	}
+	set_qtd_buffers_small(qh->buffer, buf);
 	asm volatile("dsb" ::: "memory");
 
 	// Restore S-mask to re-enable periodic processing
@@ -621,15 +609,7 @@ bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t le
 	qh->alt_next = QTD_TERMINATE;
 	qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_OUT |
 		QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-	{
-		uint32_t a = (uint32_t)buf;
-		qh->buffer[0] = a;
-		a &= 0xFFFFF000;
-		qh->buffer[1] = a + 0x1000;
-		qh->buffer[2] = a + 0x2000;
-		qh->buffer[3] = a + 0x3000;
-		qh->buffer[4] = a + 0x4000;
-	}
+	set_qtd_buffers_small(qh->buffer, buf);
 	asm volatile("dsb" ::: "memory");
 
 	intr_out_transfer_active[index] = true;
@@ -650,21 +630,13 @@ static int intr_poll_internal(uint8_t index, uint16_t len, uint8_t **buf_out)
 	ehci_qh_t *qh  = &qh_intr[index];
 	uint8_t   *buf = intr_buf[index];
 
-	if (!intr_transfer_active[index]) {
+	if (__builtin_expect(!intr_transfer_active[index], 0)) {
 		uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;
 		qh->next     = QTD_TERMINATE;
 		qh->alt_next = QTD_TERMINATE;
 		qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
 			QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-		{
-			uint32_t a = (uint32_t)buf;
-			qh->buffer[0] = a;
-			a &= 0xFFFFF000;
-			qh->buffer[1] = a + 0x1000;
-			qh->buffer[2] = a + 0x2000;
-			qh->buffer[3] = a + 0x3000;
-			qh->buffer[4] = a + 0x4000;
-		}
+		set_qtd_buffers_small(qh->buffer, buf);
 		asm volatile("dsb" ::: "memory");
 		intr_transfer_active[index] = true;
 		intr_prime_time[index] = millis();
@@ -673,8 +645,8 @@ static int intr_poll_internal(uint8_t index, uint16_t len, uint8_t **buf_out)
 
 	uint32_t token = qh->token;
 
-	if (token & QTD_TOKEN_ACTIVE) {
-		if ((millis() - intr_prime_time[index]) > 100) {
+	if (__builtin_expect(!!(token & QTD_TOKEN_ACTIVE), 1)) {
+		if (__builtin_expect((millis() - intr_prime_time[index]) > 100, 0)) {
 			qh->token = token & QTD_TOKEN_TOGGLE;
 			qh->next = QTD_TERMINATE;
 			asm volatile("dsb" ::: "memory");
@@ -687,12 +659,12 @@ static int intr_poll_internal(uint8_t index, uint16_t len, uint8_t **buf_out)
 
 	intr_transfer_active[index] = false;
 
-	if (token & QTD_TOKEN_HALTED) {
+	if (__builtin_expect(!!(token & QTD_TOKEN_HALTED), 0)) {
 		intr_halt_recover(index, len);
 		return 0;
 	}
 
-	if (token & (QTD_TOKEN_BUFERR | QTD_TOKEN_BABBLE | QTD_TOKEN_XACTERR)) {
+	if (__builtin_expect(!!(token & (QTD_TOKEN_BUFERR | QTD_TOKEN_BABBLE | QTD_TOKEN_XACTERR)), 0)) {
 		intr_error_count[index]++;
 		qh->token = token & QTD_TOKEN_TOGGLE;
 		qh->next = QTD_TERMINATE;

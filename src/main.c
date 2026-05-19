@@ -121,7 +121,8 @@ int main(void)
 	uint32_t host_wait_loops = 0;
 	while (!usb_host_device_connected()) {
 		usb_host_power_on();
-		kmbox_poll(); // respond to UART identity probes during init
+		kmbox_poll_fast(); // respond to UART identity probes during init
+		if (kmbox_rx_pending()) kmbox_poll_heavy();
 		__asm volatile("wfe");
 		led_wait_once(1, 70, 120, 650);
 		host_wait_loops++;
@@ -228,7 +229,8 @@ int main(void)
 	uint32_t dev_led_toggle = millis();
 	while (!usb_device_is_configured()) {
 		usb_device_poll();
-		kmbox_poll(); // respond to UART identity probes during init
+		kmbox_poll_fast(); // respond to UART identity probes during init
+		if (kmbox_rx_pending()) kmbox_poll_heavy();
 		if ((millis() - dev_led_toggle) >= 250) {
 			led_toggle();
 			dev_led_toggle = millis();
@@ -269,7 +271,11 @@ int main(void)
 		usb_device_poll();
 
 		// --- Command input ---
-		kmbox_poll();
+		kmbox_poll_fast();
+		if (kmbox_rx_pending()) {
+			kmbox_poll_heavy();
+			did_work = true;
+		}
 
 		for (uint8_t m = 0; m < num_ep_mappings; m++) {
 			uint8_t *rpt_ptr = NULL;

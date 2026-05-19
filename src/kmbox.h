@@ -6,7 +6,11 @@
 
 void kmbox_init(void);
 
-void kmbox_poll(void);
+// Split poll: fast runs unconditionally each iteration (timers, tx, LED
+// timeout); heavy only when kmbox_rx_pending() reports UART bytes pending.
+void kmbox_poll_fast(void);
+void kmbox_poll_heavy(void);
+bool kmbox_rx_pending(void);
 
 void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8_t len);
 

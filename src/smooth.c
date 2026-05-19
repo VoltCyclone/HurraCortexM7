@@ -6,6 +6,9 @@
 #include <string.h>
 #include <math.h>
 
+#define SMOOTH_ALL_SLOTS_MASK \
+	((SMOOTH_QUEUE_SIZE == 32) ? 0xFFFFFFFFu : ((1u << SMOOTH_QUEUE_SIZE) - 1u))
+
 static inline int32_t int_to_fp(int16_t v)
 {
 	return (int32_t)v << SMOOTH_FP_SHIFT;
@@ -224,8 +227,7 @@ static float compute_fitts_speed_gain(int32_t abs_x_fp, int32_t abs_y_fp)
 void smooth_init(uint32_t interval_us)
 {
 	memset(&state, 0, sizeof(state));
-	state.free_mask = (SMOOTH_QUEUE_SIZE == 32) ? 0xFFFFFFFFu
-		: ((1u << SMOOTH_QUEUE_SIZE) - 1u);
+	state.free_mask = SMOOTH_ALL_SLOTS_MASK;
 	state.max_per_frame = 127;
 	state.humanize = true;
 	state.interval_us = interval_us > 0 ? interval_us : 1000;
@@ -361,8 +363,7 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 	float inv_attack_frac = state.inv_attack_frac;
 	float inv_tail        = state.inv_tail;
 
-	uint32_t active = ~state.free_mask & ((SMOOTH_QUEUE_SIZE == 32)
-		? 0xFFFFFFFFu : ((1u << SMOOTH_QUEUE_SIZE) - 1u));
+	uint32_t active = ~state.free_mask & SMOOTH_ALL_SLOTS_MASK;
 	while (active) {
 		uint8_t i = (uint8_t)__builtin_ctz(active);
 		active &= active - 1; // clear lowest set bit
@@ -413,6 +414,24 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 		frame_x_fp += frame_dx;
 		frame_y_fp += frame_dy;
 		has_movement = true;
+	}
+
+	// Idle fast-path: must still decay last_noise_vx/vy each frame —
+	// it's a geometric series the next active frame inherits.
+	if (!has_movement
+	    && state.free_mask == SMOOTH_ALL_SLOTS_MASK
+	    && state.idle_frames >= SMOOTH_TREMOR_IDLE_TIMEOUT
+	    && state.x_accum_fp >  -SMOOTH_FP_HALF
+	    && state.x_accum_fp <   SMOOTH_FP_HALF
+	    && state.y_accum_fp >  -SMOOTH_FP_HALF
+	    && state.y_accum_fp <   SMOOTH_FP_HALF) {
+		if (state.idle_frames < UINT32_MAX)
+			state.idle_frames++;
+		state.last_noise_vx *= SMOOTH_VELOCITY_DECAY;
+		state.last_noise_vy *= SMOOTH_VELOCITY_DECAY;
+		*out_x = 0;
+		*out_y = 0;
+		return;
 	}
 
 	if (total_weight > 0.0f)
@@ -500,8 +519,15 @@ void smooth_process_frame(int16_t *out_x, int16_t *out_y)
 		frame_x_fp = (int32_t)(state.tremor_x * (float)SMOOTH_FP_ONE);
 		frame_y_fp = (int32_t)(state.tremor_y * (float)SMOOTH_FP_ONE);
 	} else if (!has_movement) {
-		state.tremor_x *= SMOOTH_TREMOR_DECAY;
-		state.tremor_y *= SMOOTH_TREMOR_DECAY;
+		// On the first frame past the tremor timeout, hard-zero residual
+		// state so the next call can take the idle fast-path.
+		if (state.idle_frames == SMOOTH_TREMOR_IDLE_TIMEOUT) {
+			state.tremor_x = 0.0f;
+			state.tremor_y = 0.0f;
+		} else {
+			state.tremor_x *= SMOOTH_TREMOR_DECAY;
+			state.tremor_y *= SMOOTH_TREMOR_DECAY;
+		}
 		state.x_accum_fp = 0;
 		state.y_accum_fp = 0;
 	}
@@ -545,8 +571,7 @@ bool smooth_has_pending(void)
 
 void smooth_clear(void)
 {
-	state.free_mask = (SMOOTH_QUEUE_SIZE == 32) ? 0xFFFFFFFFu
-		: ((1u << SMOOTH_QUEUE_SIZE) - 1u);
+	state.free_mask = SMOOTH_ALL_SLOTS_MASK;
 	state.count = 0;
 	state.x_accum_fp = 0;
 	state.y_accum_fp = 0;

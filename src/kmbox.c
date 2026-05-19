@@ -60,6 +60,15 @@ extern uint32_t millis(void);
 
 static uint32_t link_last_rx_time;
 
+// DMA RX major-loop ISR — fires every DMA_RX_RING_SIZE bytes. Just clears
+// the channel-done flag; SEVONPEND propagates the NVIC-pending into a SEV
+// so the main loop's WFE wakes promptly on a burst of UART data instead
+// of waiting for the next PIT tick.
+static void km_rx_dma_isr(void)
+{
+	DMA_CINT = KM_RX_CH;
+}
+
 #define DMA_RX_RING_SIZE 256
 static uint8_t dma_rx_ring[DMA_RX_RING_SIZE]
 	__attribute__((section(".dmabuffers"), aligned(DMA_RX_RING_SIZE)));
@@ -256,8 +265,11 @@ void kmbox_init(void)
 	KM_RX_CITER = DMA_RX_RING_SIZE;
 	KM_RX_BITER = DMA_RX_RING_SIZE;
 	KM_RX_DLASTSGA = -DMA_RX_RING_SIZE;
-	KM_RX_CSR = 0;
+	KM_RX_CSR = DMA_TCD_CSR_INTMAJOR;
 	KM_RX_DMAMUX = KM_RX_DMAMUX_SRC | DMAMUX_CHCFG_ENBL;
+	attachInterruptVector(IRQ_DMA_CH3, km_rx_dma_isr);
+	NVIC_SET_PRIORITY(IRQ_DMA_CH3, 160); // below USB (144) and PIT (64)
+	NVIC_ENABLE_IRQ(IRQ_DMA_CH3);
 	DMA_SERQ = KM_RX_CH;
 	KM_UART_BAUD |= LPUART_BAUD_RDMAE;
 	rx_tail = 0;
@@ -511,36 +523,42 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 	}
 }
 
-void kmbox_poll(void)
+bool kmbox_rx_pending(void)
+{
+	uint16_t head = ((uint32_t)KM_RX_DADDR - (uint32_t)dma_rx_ring)
+	              & (DMA_RX_RING_SIZE - 1);
+	return head != rx_tail;
+}
+
+void kmbox_poll_fast(void)
 {
 	merged_this_cycle = false;
-	tx_flush();
+
+	// Call tx_flush when there's data to drain (ring non-empty), when
+	// the previous DMA just finished (DONE bit set), or when a DMA is
+	// in-flight — that last case keeps tx_stuck_count incrementing so
+	// stuck-recovery still fires while the software ring is empty.
+	if (tx_head != tx_tail_pos ||
+	    (KM_TX_CSR & DMA_TCD_CSR_DONE) ||
+	    KM_TX_CITER != KM_TX_BITER)
+		tx_flush();
+
 	// Deferred baud change: apply only when TX is fully idle. We can't use
 	// CSR_DONE here — tx_flush clears it unconditionally via DMA_CDNE, so
 	// after the first poll it stays 0 until another TX *completes*. Instead
 	// check DMA_ERQ (auto-cleared on transfer completion with DREQ) plus
 	// software ring empty.
-	if (pending_baud_rate &&
+	if (__builtin_expect(pending_baud_rate != 0, 0) &&
 	    tx_head == tx_tail_pos &&
 	    !(DMA_ERQ & (1u << KM_TX_CH))) {
 		baud_change_apply(pending_baud_rate);
 		pending_baud_rate = 0;
 	}
+
 	// Drive catch_xy deadline check even when no UART RX is arriving.
 	ferrum_tick();
-	uint32_t stat = KM_UART_STAT;
-	if (__builtin_expect(stat & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF), 0)) {
-		if (stat & LPUART_STAT_OR) uart_overrun_count++;
-		if (stat & LPUART_STAT_FE) uart_framing_count++;
-		if (stat & LPUART_STAT_NF) uart_noise_count++;
-		KM_UART_STAT = stat & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF);
-		if (stat & (LPUART_STAT_OR | LPUART_STAT_FE)) {
-			ferrum_reset();
-		}
-		GPIO1_DR_TOGGLE = STATUS_LED_BIT;
-	}
 
-	if (__builtin_expect(inject.click_release_at, 0) && millis() >= inject.click_release_at) {
+	if (__builtin_expect(inject.click_release_at != 0, 0) && millis() >= inject.click_release_at) {
 		inject.mouse_buttons &= ~inject.click_release_mask;
 		inject.mouse_dirty = true;
 		inject.click_release_mask = 0;
@@ -566,13 +584,35 @@ void kmbox_poll(void)
 		}
 	}
 
+	// LINK-LED timeout lives in _fast (not _heavy) — _heavy stops being
+	// called once the ring drains, so the LED would stick on otherwise.
+	if (__builtin_expect(link_last_rx_time != 0, 0) &&
+	    (millis() - link_last_rx_time) > 50) {
+		GPIO3_DR_CLEAR = LINK_LED_BIT;
+		link_last_rx_time = 0;
+	}
+}
+
+// Called only when kmbox_rx_pending() reported bytes available. Reads
+// UART STAT, drains the DMA ring, feeds the ferrum parser, updates LINK LED.
+void kmbox_poll_heavy(void)
+{
+	uint32_t stat = KM_UART_STAT;
+	if (__builtin_expect(stat & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF), 0)) {
+		if (stat & LPUART_STAT_OR) uart_overrun_count++;
+		if (stat & LPUART_STAT_FE) uart_framing_count++;
+		if (stat & LPUART_STAT_NF) uart_noise_count++;
+		KM_UART_STAT = stat & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF);
+		if (stat & (LPUART_STAT_OR | LPUART_STAT_FE)) {
+			ferrum_reset();
+		}
+		GPIO1_DR_TOGGLE = STATUS_LED_BIT;
+	}
+
 	uint16_t head = ((uint32_t)KM_RX_DADDR - (uint32_t)dma_rx_ring) & (DMA_RX_RING_SIZE - 1);
 	if (head != rx_tail) {
 		GPIO3_DR_TOGGLE = LINK_LED_BIT;
 		link_last_rx_time = millis();
-	} else if (link_last_rx_time && (millis() - link_last_rx_time) > 50) {
-		GPIO3_DR_CLEAR = LINK_LED_BIT;
-		link_last_rx_time = 0;
 	}
 	while (rx_tail != head) {
 		uint8_t b = dma_rx_ring[rx_tail];
@@ -588,6 +628,12 @@ void kmbox_poll(void)
 	}
 }
 
+__attribute__((cold, noinline))
+static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
+                                    uint8_t rid, uint8_t doff);
+__attribute__((cold, noinline))
+static void kmbox_merge_keyboard(uint8_t *report, uint8_t len);
+
 __attribute__((section(".fastrun")))
 void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8_t len)
 {
@@ -599,7 +645,7 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 			uint8_t doff = mouse_layout.data_off;
 			uint8_t rid = doff ? report[0] : 0;
 
-			if (mouse_layout.fast_path && rid == mouse_layout.report_id) {
+			if (__builtin_expect(mouse_layout.fast_path && rid == mouse_layout.report_id, 1)) {
 				report[doff] |= inject.mouse_buttons;
 				ferrum_notify_buttons(report[doff]);
 
@@ -664,103 +710,107 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 				inject.mouse_dirty = (inject.mouse_buttons != 0 ||
 				                      inject.mouse_wheel != 0);
 			} else {
-				bool wheel_consumed = false;
-
-				if (rid == mouse_layout.report_id) {
-					report[doff] |= inject.mouse_buttons;
-					ferrum_notify_buttons(report[doff]);
-
-					int32_t rx = read_report_field(report, len, mouse_layout.x_bit,
-					                               mouse_layout.x_size, doff);
-					int32_t mx = rx + inject.mouse_dx;
-					if (mx > mouse_layout.x_max) mx = mouse_layout.x_max;
-					if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
-					write_report_field(report, len, mouse_layout.x_bit,
-					                   mouse_layout.x_size, doff, mx);
-
-					if (rid == mouse_layout.y_report_id) {
-						int32_t ry = read_report_field(report, len, mouse_layout.y_bit,
-						                               mouse_layout.y_size, doff);
-						int32_t my = ry + inject.mouse_dy;
-						if (my > mouse_layout.y_max) my = mouse_layout.y_max;
-						if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
-						write_report_field(report, len, mouse_layout.y_bit,
-						                   mouse_layout.y_size, doff, my);
-					}
-				}
-
-				if (mouse_layout.wheel_bit != 0xFFFF && inject.mouse_wheel != 0 &&
-				    rid == mouse_layout.wheel_report_id) {
-					int32_t rw = read_report_field(report, len, mouse_layout.wheel_bit,
-					                               mouse_layout.wheel_size, doff);
-					int32_t mw = rw + inject.mouse_wheel;
-					if (mw > mouse_layout.w_max) mw = mouse_layout.w_max;
-					if (mw < -mouse_layout.w_max) mw = -mouse_layout.w_max;
-					write_report_field(report, len, mouse_layout.wheel_bit,
-					                   mouse_layout.wheel_size, doff, mw);
-					wheel_consumed = true;
-				}
-
-				ferrum_notify_axes(inject.mouse_dx, inject.mouse_dy,
-				                   inject.mouse_wheel);
-				inject.mouse_dx = 0;
-				inject.mouse_dy = 0;
-				if (wheel_consumed)
-					inject.mouse_wheel = 0;
-				inject.mouse_dirty = (inject.mouse_buttons != 0 ||
-				                      inject.mouse_wheel != 0);
+				kmbox_merge_report_slow(report, len, rid, doff);
 			}
 		}
 		merged_this_cycle = true;
-	} else if (iface_protocol == 1 && inject.kb_dirty) {
-		if (len >= 8) {
-			report[0] |= inject.kb_modifier;
-			for (int i = 0; i < 6; i++) {
-				if (inject.kb_keys[i] == 0) continue;
-				bool found = false;
-				for (int j = 2; j < 8; j++) {
-					if (report[j] == inject.kb_keys[i]) {
-						found = true;
-						break;
-					}
-				}
-				if (!found) {
-					for (int j = 2; j < 8; j++) {
-						if (report[j] == 0) {
-							report[j] = inject.kb_keys[i];
-							break;
-						}
-					}
-				}
-			}
-			ferrum_notify_keys(&report[2]);
-		}
+	} else if (__builtin_expect(iface_protocol == 1 && inject.kb_dirty, 0)) {
+		kmbox_merge_keyboard(report, len);
 		merged_this_cycle = true;
 	}
 }
+
+__attribute__((cold, noinline))
+static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
+                                    uint8_t rid, uint8_t doff)
+{
+	bool wheel_consumed = false;
+
+	if (rid == mouse_layout.report_id) {
+		report[doff] |= inject.mouse_buttons;
+		ferrum_notify_buttons(report[doff]);
+
+		int32_t rx = read_report_field(report, len, mouse_layout.x_bit,
+		                               mouse_layout.x_size, doff);
+		int32_t mx = rx + inject.mouse_dx;
+		if (mx > mouse_layout.x_max) mx = mouse_layout.x_max;
+		if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
+		write_report_field(report, len, mouse_layout.x_bit,
+		                   mouse_layout.x_size, doff, mx);
+
+		if (rid == mouse_layout.y_report_id) {
+			int32_t ry = read_report_field(report, len, mouse_layout.y_bit,
+			                               mouse_layout.y_size, doff);
+			int32_t my = ry + inject.mouse_dy;
+			if (my > mouse_layout.y_max) my = mouse_layout.y_max;
+			if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
+			write_report_field(report, len, mouse_layout.y_bit,
+			                   mouse_layout.y_size, doff, my);
+		}
+	}
+
+	if (mouse_layout.wheel_bit != 0xFFFF && inject.mouse_wheel != 0 &&
+	    rid == mouse_layout.wheel_report_id) {
+		int32_t rw = read_report_field(report, len, mouse_layout.wheel_bit,
+		                               mouse_layout.wheel_size, doff);
+		int32_t mw = rw + inject.mouse_wheel;
+		if (mw > mouse_layout.w_max) mw = mouse_layout.w_max;
+		if (mw < -mouse_layout.w_max) mw = -mouse_layout.w_max;
+		write_report_field(report, len, mouse_layout.wheel_bit,
+		                   mouse_layout.wheel_size, doff, mw);
+		wheel_consumed = true;
+	}
+
+	ferrum_notify_axes(inject.mouse_dx, inject.mouse_dy,
+	                   inject.mouse_wheel);
+	inject.mouse_dx = 0;
+	inject.mouse_dy = 0;
+	if (wheel_consumed)
+		inject.mouse_wheel = 0;
+	inject.mouse_dirty = (inject.mouse_buttons != 0 ||
+	                      inject.mouse_wheel != 0);
+}
+
+__attribute__((cold, noinline))
+static void kmbox_merge_keyboard(uint8_t *report, uint8_t len)
+{
+	if (len < 8) return;
+	report[0] |= inject.kb_modifier;
+	for (int i = 0; i < 6; i++) {
+		if (inject.kb_keys[i] == 0) continue;
+		bool found = false;
+		for (int j = 2; j < 8; j++) {
+			if (report[j] == inject.kb_keys[i]) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			for (int j = 2; j < 8; j++) {
+				if (report[j] == 0) {
+					report[j] = inject.kb_keys[i];
+					break;
+				}
+			}
+		}
+	}
+	ferrum_notify_keys(&report[2]);
+}
+
+__attribute__((cold, noinline))
+static void kmbox_send_wheel_report(void);
+__attribute__((cold, noinline))
+static void kmbox_send_keyboard_report(void);
 
 __attribute__((section(".fastrun")))
 void kmbox_send_pending(void)
 {
 	// Flush unconsumed wheel on a separate report ID even when merged
-	if (merged_this_cycle && inject.mouse_wheel != 0 &&
+	if (__builtin_expect(merged_this_cycle && inject.mouse_wheel != 0 &&
 	    cached_mouse_ep && mouse_layout.valid &&
 	    mouse_layout.wheel_bit != 0xFFFF &&
-	    mouse_layout.wheel_report_id != mouse_layout.report_id) {
-		uint8_t synth[16];
-		memset(synth, 0, sizeof(synth));
-		uint8_t doff = mouse_layout.data_off;
-		if (doff) synth[0] = mouse_layout.wheel_report_id;
-		int32_t w = inject.mouse_wheel;
-		if (w > mouse_layout.w_max) w = mouse_layout.w_max;
-		if (w < -mouse_layout.w_max) w = -mouse_layout.w_max;
-		write_report_field(synth, sizeof(synth), mouse_layout.wheel_bit,
-		                   mouse_layout.wheel_size, doff, w);
-		uint8_t rlen = cached_mouse_report_len;
-		if (rlen == 0) rlen = (cached_mouse_maxpkt < 16) ? (uint8_t)cached_mouse_maxpkt : 16;
-		usb_device_send_report(cached_mouse_ep, synth, rlen);
-		inject.mouse_wheel = 0;
-		inject.mouse_dirty = (inject.mouse_buttons != 0);
+	    mouse_layout.wheel_report_id != mouse_layout.report_id, 0)) {
+		kmbox_send_wheel_report();
 	}
 
 	if (merged_this_cycle) return;
@@ -798,16 +848,41 @@ void kmbox_send_pending(void)
 		inject.mouse_wheel = 0;
 		inject.mouse_dirty = (inject.mouse_buttons != 0);
 	}
-	if (inject.kb_dirty && cached_kb_ep) {
-		uint8_t synth[8];
-		synth[0] = inject.kb_modifier;
-		synth[1] = 0;
-		memcpy(&synth[2], inject.kb_keys, 6);
-		usb_device_send_report(cached_kb_ep, synth, 8);
-		static const uint8_t zeros[6] = {0};
-		inject.kb_dirty = (inject.kb_modifier != 0 ||
-		                    memcmp(inject.kb_keys, zeros, 6) != 0);
+	if (__builtin_expect(inject.kb_dirty && cached_kb_ep, 0)) {
+		kmbox_send_keyboard_report();
 	}
+}
+
+__attribute__((cold, noinline))
+static void kmbox_send_wheel_report(void)
+{
+	uint8_t synth[16];
+	memset(synth, 0, sizeof(synth));
+	uint8_t doff = mouse_layout.data_off;
+	if (doff) synth[0] = mouse_layout.wheel_report_id;
+	int32_t w = inject.mouse_wheel;
+	if (w > mouse_layout.w_max) w = mouse_layout.w_max;
+	if (w < -mouse_layout.w_max) w = -mouse_layout.w_max;
+	write_report_field(synth, sizeof(synth), mouse_layout.wheel_bit,
+	                   mouse_layout.wheel_size, doff, w);
+	uint8_t rlen = cached_mouse_report_len;
+	if (rlen == 0) rlen = (cached_mouse_maxpkt < 16) ? (uint8_t)cached_mouse_maxpkt : 16;
+	usb_device_send_report(cached_mouse_ep, synth, rlen);
+	inject.mouse_wheel = 0;
+	inject.mouse_dirty = (inject.mouse_buttons != 0);
+}
+
+__attribute__((cold, noinline))
+static void kmbox_send_keyboard_report(void)
+{
+	uint8_t synth[8];
+	synth[0] = inject.kb_modifier;
+	synth[1] = 0;
+	memcpy(&synth[2], inject.kb_keys, 6);
+	usb_device_send_report(cached_kb_ep, synth, 8);
+	static const uint8_t zeros[6] = {0};
+	inject.kb_dirty = (inject.kb_modifier != 0 ||
+	                    memcmp(inject.kb_keys, zeros, 6) != 0);
 }
 
 void kmbox_inject_smooth(int16_t dx, int16_t dy)
