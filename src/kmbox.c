@@ -527,7 +527,12 @@ bool kmbox_rx_pending(void)
 {
 	uint16_t head = ((uint32_t)KM_RX_DADDR - (uint32_t)dma_rx_ring)
 	              & (DMA_RX_RING_SIZE - 1);
-	return head != rx_tail;
+	if (head != rx_tail) return true;
+	// Also gate heavy on a sticky LPUART error so it gets cleared. OR in
+	// particular halts hardware reception until cleared — leaving it set
+	// would lock UART forever (no bytes → rx_pending stays false → heavy
+	// never runs → OR never cleared).
+	return (KM_UART_STAT & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF)) != 0;
 }
 
 void kmbox_poll_fast(void)
