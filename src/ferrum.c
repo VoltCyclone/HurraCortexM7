@@ -20,6 +20,12 @@ extern uint32_t millis(void);
 
 #define FERRUM_LINE_MAX  128
 #define FERRUM_MAX_ARGS  8
+// If a byte arrives this many ms after the previous one with a partial
+// line still in the accumulator, drop the partial line first. Guards
+// against garbage from a wrong-baud burst sticking around without a
+// terminator and prefixing the next legitimate command after the host
+// close-reopens at the correct baud.
+#define FERRUM_IDLE_GAP_MS 25
 
 // --- transport ---------------------------------------------------------------
 static ferrum_tx_fn s_tx;
@@ -35,9 +41,10 @@ static inline void emit_cstr(const char *s)
 }
 
 // --- line buffer -------------------------------------------------------------
-static char    s_line[FERRUM_LINE_MAX];
-static uint8_t s_line_pos;
-static bool    s_overflow;
+static char     s_line[FERRUM_LINE_MAX];
+static uint8_t  s_line_pos;
+static bool     s_overflow;
+static uint32_t s_last_byte_ms;
 
 // --- callback enable flags ---------------------------------------------------
 static uint8_t s_cb_buttons;
@@ -562,13 +569,22 @@ void ferrum_tick(void)
 
 void ferrum_feed_byte(uint8_t b)
 {
+	uint32_t now = millis();
+
 	// catch_xy: emit result when timer expires.  Belt-and-braces — also
 	// covered by ferrum_tick() from the poll loop, but checking here lets
 	// us emit immediately when the host pokes us with new bytes.
-	if (__builtin_expect(s_catch.active, 0) && millis() >= s_catch.deadline) {
+	if (__builtin_expect(s_catch.active, 0) && now >= s_catch.deadline) {
 		emit_catch_result();
 		s_catch.active = false;
 	}
+
+	// Idle-gap reset: see FERRUM_IDLE_GAP_MS.
+	if (s_line_pos > 0 && (now - s_last_byte_ms) > FERRUM_IDLE_GAP_MS) {
+		s_line_pos = 0;
+		s_overflow = false;
+	}
+	s_last_byte_ms = now;
 
 	if (b == '\r' || b == '\n') {
 		if (s_line_pos > 0 && !s_overflow) {
