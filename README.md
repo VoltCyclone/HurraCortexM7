@@ -7,7 +7,7 @@ Drop-in compatible with software written for the [Ferrum](https://ferrumllc.gith
 ## Hardware
 
 - **SparkFun MicroMod Teensy** on the **MicroMod ATP Carrier Board**.
-- **Silicon Labs CP2102C** USB-UART bridge wired to Teensy `RX1`/`TX1` (LPUART6).
+- **Silicon Labs CP2102C** USB-UART bridge wired to Teensy `RX2`/`TX2` (D16/D17 → LPUART3; ATP carrier UART_RX2/UART_TX2 headers).
 - A USB HID device (mouse, keyboard, controller) on the Teensy's USB host port.
 - Teensy USB device port to the host PC.
 
@@ -18,7 +18,7 @@ Drop-in compatible with software written for the [Ferrum](https://ferrumllc.gith
                           ↑
                           │ km.* commands
                           │
-   Host PC USB ──→ CP2102C ──→ Teensy LPUART6 (D0/D1)
+   Host PC USB ──→ CP2102C ──→ Teensy LPUART3 (D16/D17)
 ```
 
 ## Wire protocol
@@ -76,7 +76,7 @@ src/main.c            poll loop: USB host → merge → USB device send
 src/usb_host.c/.h     EHCI host (USB2)
 src/usb_device.c/.h   EHCI device (USB1)
 src/desc_capture.*    descriptor + HID report-layout capture
-src/kmbox.c/.h        LPUART6 DMA RX/TX ring + HID merge
+src/kmbox.c/.h        LPUART3 DMA RX/TX ring + HID merge
 src/ferrum.c/.h       Ferrum ASCII parser + dispatch + callbacks
 src/actions.c/.h      transport-agnostic injection helpers (act_*)
 src/smooth.c/.h       bezier-smoothed motion queue

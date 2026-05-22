@@ -7,7 +7,7 @@ TARGET = firmware
 
 MCU_FLAGS = -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb
 
-# UART baud for kmbox <-> host link.  LPUART6 on Teensy pins 0/1, no flow control.
+# UART baud for kmbox <-> host link.  LPUART3 on Teensy pins 16/17 (ATP UART_RX2/UART_TX2), no flow control.
 CMD_BAUD ?= 115200
 
 DEFINES = -DARDUINO_TEENSY_MICROMOD -D__IMXRT1062__ -DF_CPU=816000000 \
