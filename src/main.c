@@ -33,11 +33,6 @@ static void led_blink_forever(uint8_t code, uint32_t on_ms, uint32_t off_ms)
 }
 static void led_stage(uint8_t n) __attribute__((unused));
 static void led_stage(uint8_t n) { (void)n; }
-static void led_wait_once(uint8_t pulses, uint32_t on_ms, uint32_t off_ms, uint32_t gap_ms)
-{
-	(void)pulses; (void)on_ms; (void)off_ms;
-	delay(gap_ms);
-}
 
 typedef struct {
 	uint8_t  host_slot;
@@ -118,17 +113,11 @@ int main(void)
 	usb_host_init();
 	led_off();
 	usb_host_power_on();
-	uint32_t host_wait_loops = 0;
 	while (!usb_host_device_connected()) {
 		usb_host_power_on();
 		kmbox_poll_fast(); // respond to UART identity probes during init
 		if (kmbox_rx_pending()) kmbox_poll_heavy();
 		__asm volatile("wfe");
-		led_wait_once(1, 70, 120, 650);
-		host_wait_loops++;
-		if (host_wait_loops > 60u) {
-			led_blink_forever(7, 80, 120);
-		}
 	}
 
 	led_on();
