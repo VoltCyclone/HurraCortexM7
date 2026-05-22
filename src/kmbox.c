@@ -1,4 +1,6 @@
-// Ferrum ASCII command injection over LPUART6 (pins 0/1)
+// Ferrum ASCII command injection over LPUART3 (Teensy MicroMod pins 16/17,
+// exposed on the ATP carrier as UART_RX2/UART_TX2, M.2 pads 21/22).
+// Moved off LPUART6 (pins 0/1) after suspected pad damage on D0/D1.
 
 #include "kmbox.h"
 #include "smooth.h"
@@ -10,16 +12,16 @@ extern uint32_t millis(void);
 
 #define UART_CLOCK 24000000
 
-// Pin 1 = GPIO_AD_B0_02 ALT2 = LPUART6_TX
-// Pin 0 = GPIO_AD_B0_03 ALT2 = LPUART6_RX
+// Pin 17 = GPIO_AD_B1_06 ALT2 = LPUART3_TX  (MicroMod UART_TX2, M.2 pad 22)
+// Pin 16 = GPIO_AD_B1_07 ALT2 = LPUART3_RX  (MicroMod UART_RX2, M.2 pad 21)
 #define UART_BAUD          CMD_BAUD
 
-#define KM_UART_BAUD       LPUART6_BAUD
-#define KM_UART_CTRL       LPUART6_CTRL
-#define KM_UART_STAT       LPUART6_STAT
-#define KM_UART_DATA       LPUART6_DATA
-#define KM_UART_FIFO       LPUART6_FIFO
-#define KM_UART_WATER      LPUART6_WATER
+#define KM_UART_BAUD       LPUART3_BAUD
+#define KM_UART_CTRL       LPUART3_CTRL
+#define KM_UART_STAT       LPUART3_STAT
+#define KM_UART_DATA       LPUART3_DATA
+#define KM_UART_FIFO       LPUART3_FIFO
+#define KM_UART_WATER      LPUART3_WATER
 
 #define KM_RX_SADDR        DMA_TCD3_SADDR
 #define KM_RX_SOFF         DMA_TCD3_SOFF
@@ -33,7 +35,7 @@ extern uint32_t millis(void);
 #define KM_RX_DLASTSGA     DMA_TCD3_DLASTSGA
 #define KM_RX_CSR          DMA_TCD3_CSR
 #define KM_RX_DMAMUX       DMAMUX_CHCFG3
-#define KM_RX_DMAMUX_SRC   DMAMUX_SOURCE_LPUART6_RX
+#define KM_RX_DMAMUX_SRC   DMAMUX_SOURCE_LPUART3_RX
 #define KM_RX_CH           3
 
 #define KM_TX_SADDR        DMA_TCD4_SADDR
@@ -48,7 +50,7 @@ extern uint32_t millis(void);
 #define KM_TX_DLASTSGA     DMA_TCD4_DLASTSGA
 #define KM_TX_CSR          DMA_TCD4_CSR
 #define KM_TX_DMAMUX       DMAMUX_CHCFG4
-#define KM_TX_DMAMUX_SRC   DMAMUX_SOURCE_LPUART6_TX
+#define KM_TX_DMAMUX_SRC   DMAMUX_SOURCE_LPUART3_TX
 #define KM_TX_CH           4
 
 // D31 = LINK:  GPIO_EMC_37 = GPIO3[23] — toggles when UART data arriving
@@ -59,6 +61,10 @@ extern uint32_t millis(void);
 #define STATUS_LED_BIT (1u << 12)
 
 static uint32_t link_last_rx_time;
+// Separate from link_last_rx_time (which is cleared by the LED-timeout path
+// in kmbox_poll_fast). Tracks any RX activity for the auto-baud-reset gate.
+static uint32_t last_rx_activity_time;
+#define BAUD_IDLE_RESET_MS 5000
 
 // DMA RX major-loop ISR — fires every DMA_RX_RING_SIZE bytes. Just clears
 // the channel-done flag; SEVONPEND propagates the NVIC-pending into a SEV
@@ -69,7 +75,20 @@ static void km_rx_dma_isr(void)
 	DMA_CINT = KM_RX_CH;
 }
 
-#define DMA_RX_RING_SIZE 256
+// LPUART IDLE-line ISR — fires after one idle character at the end of each
+// CH343B USB-frame burst. Pairs with the DMA major-loop ISR to wake the
+// main loop's WFE between bursts (DMA only fires every DMA_RX_RING_SIZE
+// bytes, so without this the last partial burst would wait for the next
+// PIT tick). Body just W1C's the IDLE flag; SEVONPEND handles the wake.
+static void km_uart_idle_isr(void)
+{
+	KM_UART_STAT = LPUART_STAT_IDLE;
+}
+
+// Ring sized to match CH343B's 1 KB USB IN buffer so a full burst lands in
+// one transfer. At 2 Mbaud (~200 KB/s) this is ~5 ms of headroom vs the
+// previous 256-byte ring's 1.3 ms.
+#define DMA_RX_RING_SIZE 1024
 static uint8_t dma_rx_ring[DMA_RX_RING_SIZE]
 	__attribute__((section(".dmabuffers"), aligned(DMA_RX_RING_SIZE)));
 static volatile uint16_t rx_tail;
@@ -117,6 +136,7 @@ static uint32_t uart_noise_count;
 
 static uint32_t tx_bytes_total;
 static uint32_t tx_stuck_count;
+static uint32_t tx_overflow_count;
 static uint32_t pending_baud_rate;
 #define TX_STUCK_THRESHOLD 5000       // ~5k polls ≈ 50ms at 100kHz poll rate
 
@@ -157,7 +177,10 @@ static void baud_change_apply(uint32_t baud);
 static void tx_enqueue(uint8_t b)
 {
 	uint16_t next = (tx_head + 1) & (TX_RING_SIZE - 1);
-	if (next == tx_tail_pos) return;
+	if (next == tx_tail_pos) {
+		tx_overflow_count++;
+		return;
+	}
 	tx_ring[tx_head] = b;
 	tx_head = next;
 }
@@ -202,18 +225,55 @@ static void tx_flush(void)
 	KM_TX_CSR = DMA_TCD_CSR_DREQ;
 	DMA_SERQ = KM_TX_CH;
 }
+// Compute LPUART BAUD register OSR/SBR/BOTHEDGE bits for the requested rate.
+// Follows NXP fsl_lpuart.c: searches all oversampling divisors 4..32, uses
+// round-to-nearest SBR, and rejects (returns 0) if no combo lands within 3%
+// of the requested baud (the same tolerance the NXP driver enforces). The
+// returned value is the bare OSR|SBR(|BOTHEDGE) bits — caller adds RDMAE/TDMAE.
+static uint32_t compute_baud_reg(uint32_t baud)
+{
+	if (baud == 0) return 0;
+	uint32_t best_osr_div = 0;
+	uint32_t best_sbr = 0;
+	uint32_t best_diff = 0xFFFFFFFFu;
+	for (uint32_t osr_div = 4; osr_div <= 32; osr_div++) {
+		// Round-to-nearest: (2*num/den + 1) / 2
+		uint32_t sbr = (UART_CLOCK * 2u / (baud * osr_div) + 1u) / 2u;
+		if (sbr == 0) sbr = 1;
+		if (sbr > 0x1FFFu) sbr = 0x1FFFu; // SBR is 13 bits
+		uint32_t calc = UART_CLOCK / (osr_div * sbr);
+		uint32_t diff = (calc > baud) ? (calc - baud) : (baud - calc);
+		// '<=' to match fsl_lpuart.c: on ties, prefer the higher OSR (more
+		// samples per bit → better noise immunity, no BOTHEDGE needed).
+		if (diff <= best_diff) {
+			best_diff = diff;
+			best_osr_div = osr_div;
+			best_sbr = sbr;
+		}
+	}
+	// 3% tolerance — matches NXP's kStatus_LPUART_BaudrateNotSupport gate.
+	if (best_diff > (baud / 100u) * 3u) return 0;
+	// BAUD[OSR] field stores divisor-1 (RM §49.4.4.4: value 0x3 → 4× OSR).
+	uint32_t reg = LPUART_BAUD_OSR(best_osr_div - 1u) | LPUART_BAUD_SBR(best_sbr);
+	// BOTHEDGE required when oversampling ratio is 4..7 (RM §49.4.4.4).
+	if (best_osr_div >= 4 && best_osr_div <= 7) reg |= LPUART_BAUD_BOTHEDGE;
+	return reg;
+}
+
 void kmbox_init(void)
 {
-	CCM_CCGR3 |= CCM_CCGR3_LPUART6(CCM_CCGR_ON);
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_02 = 2;
-	IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B0_02 =
+	CCM_CCGR0 |= CCM_CCGR0_LPUART3(CCM_CCGR_ON);
+	// TX = pin 17 = GPIO_AD_B1_06 ALT2 = LPUART3_TX
+	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_06 = 2;
+	IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B1_06 =
 		IOMUXC_PAD_DSE(6) | IOMUXC_PAD_SPEED(2);
-	IOMUXC_LPUART6_TX_SELECT_INPUT = 1;
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_03 = 2;
-	IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B0_03 =
+	IOMUXC_LPUART3_TX_SELECT_INPUT = 0; // DAISY=0 → GPIO_AD_B1_06_ALT2
+	// RX = pin 16 = GPIO_AD_B1_07 ALT2 = LPUART3_RX (keep keeper/pull-up)
+	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_07 = 2;
+	IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B1_07 =
 		IOMUXC_PAD_DSE(6) | IOMUXC_PAD_SPEED(2) |
 		IOMUXC_PAD_PKE | IOMUXC_PAD_PUE | IOMUXC_PAD_PUS(3);
-	IOMUXC_LPUART6_RX_SELECT_INPUT = 1;
+	IOMUXC_LPUART3_RX_SELECT_INPUT = 0; // DAISY=0 → GPIO_AD_B1_07_ALT2
 
 	IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_37 = 5; // D31 LINK — ALT5 = GPIO3[23]
 	IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_37 = IOMUXC_PAD_DSE(6);
@@ -228,20 +288,12 @@ void kmbox_init(void)
 	GPIO1_GDIR |= STATUS_LED_BIT;
 	GPIO1_DR_SET = STATUS_LED_BIT; // ON = UART configured OK
 
-	// OSR so SBR >= 1
-	uint32_t osr;
-	if (UART_BAUD <= 460800) {
-		osr = 15;
-	} else {
-		osr = UART_CLOCK / UART_BAUD - 1;
-		if (osr < 4) osr = 4;
-		if (osr > 31) osr = 31;
+	uint32_t baud_reg = compute_baud_reg(UART_BAUD);
+	if (baud_reg == 0) {
+		// Build-time default rate is known-good; this should be unreachable.
+		// Fallback: 115200 with OSR=16 (field=15), SBR=13 → 115384 (-0.16%).
+		baud_reg = LPUART_BAUD_OSR(15) | LPUART_BAUD_SBR(13);
 	}
-	uint32_t sbr = UART_CLOCK / (UART_BAUD * (osr + 1));
-	if (sbr == 0) sbr = 1;
-	// RM §49.4.4.4: BOTHEDGE required when 4 <= OSR <= 7.
-	uint32_t baud_reg = LPUART_BAUD_OSR(osr) | LPUART_BAUD_SBR(sbr);
-	if (osr < 8) baud_reg |= LPUART_BAUD_BOTHEDGE;
 	KM_UART_BAUD = baud_reg;
 	KM_UART_CTRL = 0;
 	KM_UART_FIFO = LPUART_FIFO_RXFE | LPUART_FIFO_TXFE;
@@ -252,6 +304,14 @@ void kmbox_init(void)
 	KM_UART_WATER = LPUART_WATER_RXWATER(0) | LPUART_WATER_TXWATER(2);
 
 	KM_UART_CTRL = LPUART_CTRL_TE | LPUART_CTRL_RE;
+	// Clear any pending IDLE (set by hardware when RE went on), then enable
+	// the IDLE interrupt for end-of-burst wake. ISR is just W1C — SEVONPEND
+	// propagates the NVIC pending into a SEV that wakes the WFE in main.
+	KM_UART_STAT = LPUART_STAT_IDLE;
+	KM_UART_CTRL |= LPUART_CTRL_ILIE;
+	attachInterruptVector(IRQ_LPUART3, km_uart_idle_isr);
+	NVIC_SET_PRIORITY(IRQ_LPUART3, 160); // same band as DMA RX
+	NVIC_ENABLE_IRQ(IRQ_LPUART3);
 	CCM_CCGR5 |= CCM_CCGR5_DMA(CCM_CCGR_ON);
 	KM_RX_DMAMUX = 0; // disable before reconfiguring
 	KM_RX_SADDR = (volatile const void *)&KM_UART_DATA;
@@ -296,6 +356,7 @@ void kmbox_init(void)
 	frames_err = 0;
 	tx_bytes_total = 0;
 	tx_stuck_count = 0;
+	tx_overflow_count = 0;
 	uart_overrun_count = 0;
 	uart_framing_count = 0;
 	uart_noise_count = 0;
@@ -308,6 +369,7 @@ void kmbox_init(void)
 	cached_mouse_report_len = 0;
 
 	link_last_rx_time = 0;
+	last_rx_activity_time = 0;
 
 	ferrum_set_tx(uart_tx_frame);
 	ferrum_init();
@@ -548,6 +610,16 @@ void kmbox_poll_fast(void)
 	    KM_TX_CITER != KM_TX_BITER)
 		tx_flush();
 
+	// Auto-reset baud to 115200 after extended RX idle so a host that closes
+	// and reopens the VCOM (without power-cycling the device) gets a clean
+	// recovery — Ferrum's spec resets baud on power cycle only, but the host
+	// has no way to know the current rate after reopening the port.
+	if (__builtin_expect(current_baud != 115200 && pending_baud_rate == 0 &&
+	                     last_rx_activity_time != 0 &&
+	                     (millis() - last_rx_activity_time) > BAUD_IDLE_RESET_MS, 0)) {
+		pending_baud_rate = 115200;
+	}
+
 	// Deferred baud change: apply only when TX is fully idle. We can't use
 	// CSR_DONE here — tx_flush clears it unconditionally via DMA_CDNE, so
 	// after the first poll it stays 0 until another TX *completes*. Instead
@@ -618,6 +690,7 @@ void kmbox_poll_heavy(void)
 	if (head != rx_tail) {
 		GPIO3_DR_TOGGLE = LINK_LED_BIT;
 		link_last_rx_time = millis();
+		last_rx_activity_time = link_last_rx_time;
 	}
 	while (rx_tail != head) {
 		uint8_t b = dma_rx_ring[rx_tail];
@@ -899,29 +972,21 @@ void kmbox_inject_smooth(int16_t dx, int16_t dy)
 
 static void baud_change_apply(uint32_t baud)
 {
-	KM_UART_CTRL &= ~(LPUART_CTRL_TE | LPUART_CTRL_RE);
-
-	uint32_t osr;
-	if (baud <= 460800) {
-		osr = 15;
-	} else {
-		osr = UART_CLOCK / baud - 1;
-		if (osr < 4) osr = 4;
-		if (osr > 31) osr = 31;
+	uint32_t baud_reg = compute_baud_reg(baud);
+	if (baud_reg == 0) {
+		// Rate unachievable within 3% — keep the current configuration so
+		// the host can recover by issuing km.baud() with a supported rate.
+		return;
 	}
-	uint32_t sbr = UART_CLOCK / (baud * (osr + 1));
-	if (sbr == 0) sbr = 1;
 
-	// RM §49.4.4.4: BOTHEDGE required when 4 <= OSR <= 7.
-	uint32_t baud_reg = LPUART_BAUD_OSR(osr) | LPUART_BAUD_SBR(sbr)
-	                  | LPUART_BAUD_RDMAE | LPUART_BAUD_TDMAE;
-	if (osr < 8) baud_reg |= LPUART_BAUD_BOTHEDGE;
-	KM_UART_BAUD = baud_reg;
-
+	KM_UART_CTRL &= ~(LPUART_CTRL_TE | LPUART_CTRL_RE);
+	KM_UART_BAUD = baud_reg | LPUART_BAUD_RDMAE | LPUART_BAUD_TDMAE;
+	// Clear pending IDLE before re-enabling RE so we don't take a spurious
+	// IDLE-line IRQ from the disable/enable transition.
+	KM_UART_STAT = LPUART_STAT_IDLE;
 	KM_UART_CTRL |= LPUART_CTRL_TE | LPUART_CTRL_RE;
 
 	current_baud = baud;
-
 	detected_proto = 0;
 }
 
@@ -940,6 +1005,7 @@ uint32_t kmbox_tx_byte_count(void) { return tx_bytes_total; }
 uint32_t kmbox_uart_overrun(void) { return uart_overrun_count; }
 uint32_t kmbox_uart_framing(void) { return uart_framing_count; }
 uint32_t kmbox_uart_noise(void) { return uart_noise_count; }
+uint32_t kmbox_tx_overflow(void) { return tx_overflow_count; }
 uint8_t  kmbox_protocol_mode(void) { return detected_proto; }
 __attribute__((section(".fastrun")))
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
