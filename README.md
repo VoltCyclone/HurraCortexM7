@@ -1,4 +1,4 @@
-# imxrtnsy
+# hurra v2 - USB HS
 
 Bare-metal USB HID man-in-the-middle firmware for the **SparkFun MicroMod Teensy** (NXP i.MX RT1062). Enumerates a real USB HID device on the host port, replays it on the device port to the Mac/PC, and accepts **Ferrum text protocol** commands over UART to inject mouse/keyboard input on top of the live HID stream.
 
