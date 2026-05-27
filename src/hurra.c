@@ -495,6 +495,68 @@ static TF_Result l_catch_xy(TinyFrame *tf, TF_Msg *msg)
     return TF_STAY;
 }
 
+// ── admin listeners: INIT / REBOOT / BAUD / SCREEN ──────────────────────────
+
+static TF_Result l_init(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    act_init();
+    act_kb_init();
+    s_rx_frames_ok = 0;  s_head_crc_err = 0; s_payload_crc_err = 0;
+    s_id_gap_total = 0;  s_idle_resync  = 0; s_payload_invalid = 0;
+    s_tx_ring_skip = 0;  s_tx_ring_high_water = 0;
+    return TF_STAY;
+}
+
+static TF_Result l_reboot(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    uint8_t ok = 0;
+    send_reply(msg, &ok, 1);
+    s_reboot_at = millis() + 20;
+    return TF_STAY;
+}
+
+static TF_Result l_baud(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len == 0) {
+        uint32_t b = kmbox_current_baud();
+        uint8_t p[4] = { (uint8_t)b, (uint8_t)(b >> 8), (uint8_t)(b >> 16), (uint8_t)(b >> 24) };
+        send_reply(msg, p, 4);
+        return TF_STAY;
+    }
+    if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
+    uint32_t new_baud = rd_u32le(&msg->data[0]);
+    uint8_t  ack[4]  = { (uint8_t)new_baud, (uint8_t)(new_baud >> 8),
+                         (uint8_t)(new_baud >> 16), (uint8_t)(new_baud >> 24) };
+    send_reply(msg, ack, 4);
+    s_baud_pending  = new_baud;
+    s_baud_apply_at = millis() + 20;
+    return TF_STAY;
+}
+
+static TF_Result l_screen(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len == 0) {
+        uint8_t p[4] = {
+            (uint8_t)s_screen_w, (uint8_t)(s_screen_w >> 8),
+            (uint8_t)s_screen_h, (uint8_t)(s_screen_h >> 8),
+        };
+        send_reply(msg, p, 4);
+        return TF_STAY;
+    }
+    if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
+    s_screen_w = rd_i16le(&msg->data[0]);
+    s_screen_h = rd_i16le(&msg->data[2]);
+    return TF_STAY;
+}
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -558,6 +620,10 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_LOCK_MX,  l_lock_mx);
     TF_AddTypeListener(&s_tf, TYPE_LOCK_MY,  l_lock_my);
     TF_AddTypeListener(&s_tf, TYPE_CATCH_XY, l_catch_xy);
+    TF_AddTypeListener(&s_tf, TYPE_INIT,   l_init);
+    TF_AddTypeListener(&s_tf, TYPE_REBOOT, l_reboot);
+    TF_AddTypeListener(&s_tf, TYPE_BAUD,   l_baud);
+    TF_AddTypeListener(&s_tf, TYPE_SCREEN, l_screen);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
@@ -582,6 +648,10 @@ void hurra_tick(void)
         r.data = p; r.len = 8;
         TF_Respond(&s_tf, &r);
         s_catch.active = false;
+    }
+    if (s_baud_apply_at && now >= s_baud_apply_at) {
+        kmbox_set_baud(s_baud_pending);
+        s_baud_apply_at = 0;
     }
     if (s_reboot_at && now >= s_reboot_at) {
         SCB_AIRCR = 0x05FA0004;  // ARM SYSRESETREQ (macro from imxrt.h)
