@@ -158,6 +158,53 @@ static void track_id(uint8_t id)
     s_have_last_id = true;
 }
 
+// ── admin listeners: PING / VERSION / STATS ──────────────────────────────────
+
+static TF_Result l_ping(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
+    send_reply(msg, msg->data, 4);   // echo nonce
+    return TF_STAY;
+}
+
+static TF_Result l_version(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    send_reply(msg, (const uint8_t *)HURRA_IDENTITY, sizeof(HURRA_IDENTITY) - 1);
+    return TF_STAY;
+}
+
+static void pack_stats(uint8_t out[36])
+{
+    uint32_t uptime = millis();
+    uint16_t ring_hw = s_tx_ring_high_water;
+    s_tx_ring_high_water = 0;  // reset peak each emit
+    memcpy(&out[0],  &uptime,            4);
+    memcpy(&out[4],  &s_rx_frames_ok,    4);
+    memcpy(&out[8],  &s_head_crc_err,    4);
+    memcpy(&out[12], &s_payload_crc_err, 4);
+    memcpy(&out[16], &s_id_gap_total,    4);
+    memcpy(&out[20], &s_idle_resync,     4);
+    uint32_t over = kmbox_rx_drv_overrun();
+    memcpy(&out[24], &over,              4);
+    memcpy(&out[28], &s_tx_ring_skip,    4);
+    memcpy(&out[32], &s_payload_invalid, 4);
+    (void)ring_hw;  // included in future 40-byte extension
+}
+
+static TF_Result l_stats(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    uint8_t buf[36];
+    pack_stats(buf);
+    send_reply(msg, buf, sizeof(buf));
+    return TF_STAY;
+}
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -183,7 +230,10 @@ void hurra_init(void)
     s_screen_w = s_screen_h = 0;
     memset(&s_catch, 0, sizeof(s_catch));
     s_stats_next_ms = STATS_PERIOD_MS;
-    // Listeners registered in Phase 4-6 tasks.
+    // Admin listeners (Task 4.2)
+    TF_AddTypeListener(&s_tf, TYPE_PING,    l_ping);
+    TF_AddTypeListener(&s_tf, TYPE_VERSION, l_version);
+    TF_AddTypeListener(&s_tf, TYPE_STATS,   l_stats);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
