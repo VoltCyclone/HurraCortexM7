@@ -287,6 +287,53 @@ static TF_Result l_mouse_getpos(TinyFrame *tf, TF_Msg *msg)
     return TF_STAY;
 }
 
+// ── button listeners ──────────────────────────────────────────────────────────
+
+static TF_Result button_listener(TinyFrame *tf, TF_Msg *msg, uint8_t mask)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len == 0) {
+        uint8_t v = (g_buttons & mask) ? 1 : 0;
+        send_reply(msg, &v, 1);
+        return TF_STAY;
+    }
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    act_button_set(mask, msg->data[0] ? 1 : 0);
+    return TF_STAY;
+}
+
+#define MAKE_BTN(NAME, MASK) \
+static TF_Result l_##NAME(TinyFrame *tf, TF_Msg *m) { return button_listener(tf, m, MASK); }
+
+MAKE_BTN(btn_left,   0x01)
+MAKE_BTN(btn_right,  0x02)
+MAKE_BTN(btn_middle, 0x04)
+MAKE_BTN(btn_side1,  0x08)
+MAKE_BTN(btn_side2,  0x10)
+
+static TF_Result invert_listener(TinyFrame *tf, TF_Msg *msg,
+                                 bool (*get)(void), void (*set)(bool))
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len == 0) {
+        uint8_t v = get() ? 1 : 0;
+        send_reply(msg, &v, 1);
+        return TF_STAY;
+    }
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    set(msg->data[0] != 0);
+    return TF_STAY;
+}
+
+static TF_Result l_invert_x(TinyFrame *tf, TF_Msg *m)
+{ return invert_listener(tf, m, act_get_invert_x, act_set_invert_x); }
+static TF_Result l_invert_y(TinyFrame *tf, TF_Msg *m)
+{ return invert_listener(tf, m, act_get_invert_y, act_set_invert_y); }
+static TF_Result l_swap_xy(TinyFrame *tf, TF_Msg *m)
+{ return invert_listener(tf, m, act_get_swap_xy, act_set_swap_xy); }
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -324,6 +371,15 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_CLICK,       l_mouse_click);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_WHEEL,       l_mouse_wheel);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_GETPOS,      l_mouse_getpos);
+    // Button + invert/swap listeners (Task 4.4)
+    TF_AddTypeListener(&s_tf, TYPE_BTN_LEFT,   l_btn_left);
+    TF_AddTypeListener(&s_tf, TYPE_BTN_RIGHT,  l_btn_right);
+    TF_AddTypeListener(&s_tf, TYPE_BTN_MIDDLE, l_btn_middle);
+    TF_AddTypeListener(&s_tf, TYPE_BTN_SIDE1,  l_btn_side1);
+    TF_AddTypeListener(&s_tf, TYPE_BTN_SIDE2,  l_btn_side2);
+    TF_AddTypeListener(&s_tf, TYPE_INVERT_X,   l_invert_x);
+    TF_AddTypeListener(&s_tf, TYPE_INVERT_Y,   l_invert_y);
+    TF_AddTypeListener(&s_tf, TYPE_SWAP_XY,    l_swap_xy);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
