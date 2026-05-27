@@ -557,6 +557,47 @@ static TF_Result l_screen(TinyFrame *tf, TF_Msg *msg)
     return TF_STAY;
 }
 
+// ── stream/callback configuration listeners ──────────────────────────────────
+
+static TF_Result stream_cfg_listener(TinyFrame *tf, TF_Msg *msg, stream_t *s)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len == 0) {
+        uint8_t p[2] = { s->mode, s->period_ms };
+        send_reply(msg, p, 2);
+        return TF_STAY;
+    }
+    if (msg->len != 2) { s_payload_invalid++; return TF_STAY; }
+    s->mode = msg->data[0];
+    s->period_ms = msg->data[1];
+    s->last_ms = millis();
+    return TF_STAY;
+}
+
+static TF_Result cb_toggle_listener(TinyFrame *tf, TF_Msg *msg, uint8_t *flag)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len == 0) {
+        send_reply(msg, flag, 1);
+        return TF_STAY;
+    }
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    *flag = msg->data[0] ? 1 : 0;
+    if (flag == &s_cb_keys) memset(s_last_keys_emitted, 0xFF, sizeof(s_last_keys_emitted));
+    if (flag == &s_cb_buttons) s_last_btn_emitted = 0xFF;
+    return TF_STAY;
+}
+
+static TF_Result l_stream_axis(TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_axis);  }
+static TF_Result l_stream_btn (TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_btn);   }
+static TF_Result l_stream_ms  (TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_mouse); }
+static TF_Result l_stream_kb  (TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_kb);    }
+static TF_Result l_cb_btn     (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_buttons); }
+static TF_Result l_cb_axes    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_axes);    }
+static TF_Result l_cb_keys    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_keys);    }
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -624,6 +665,13 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_REBOOT, l_reboot);
     TF_AddTypeListener(&s_tf, TYPE_BAUD,   l_baud);
     TF_AddTypeListener(&s_tf, TYPE_SCREEN, l_screen);
+    TF_AddTypeListener(&s_tf, TYPE_STREAM_AXIS,  l_stream_axis);
+    TF_AddTypeListener(&s_tf, TYPE_STREAM_BTN,   l_stream_btn);
+    TF_AddTypeListener(&s_tf, TYPE_STREAM_MOUSE, l_stream_ms);
+    TF_AddTypeListener(&s_tf, TYPE_STREAM_KB,    l_stream_kb);
+    TF_AddTypeListener(&s_tf, TYPE_CB_BUTTONS,   l_cb_btn);
+    TF_AddTypeListener(&s_tf, TYPE_CB_AXES,      l_cb_axes);
+    TF_AddTypeListener(&s_tf, TYPE_CB_KEYS,      l_cb_keys);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
