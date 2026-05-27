@@ -749,6 +749,13 @@ void hurra_tick(void)
     stream_emit_mouse(now);
     stream_emit_kb(now);
 
+    if (now >= s_stats_next_ms) {
+        s_stats_next_ms = now + STATS_PERIOD_MS;
+        uint8_t buf[36];
+        pack_stats(buf);
+        tlm_send(TYPE_TLM_STATS, buf, sizeof(buf));
+    }
+
     if (s_catch.active && now >= s_catch.deadline) {
         uint8_t p[8];
         memcpy(&p[0], &s_catch.accum_x, 4);
