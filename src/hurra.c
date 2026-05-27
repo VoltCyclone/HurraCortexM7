@@ -598,6 +598,66 @@ static TF_Result l_cb_btn     (TinyFrame *tf, TF_Msg *m) { return cb_toggle_list
 static TF_Result l_cb_axes    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_axes);    }
 static TF_Result l_cb_keys    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_keys);    }
 
+// ── telemetry emit (TLM_AXIS / TLM_BUTTONS / TLM_MOUSE / TLM_KB) ────────────
+//
+// Skipped if TX ring is too full to swallow the frame. Input listeners never
+// skip — input is the product; only telemetry yields under backpressure.
+#define TLM_TX_SLACK 32
+
+static void tlm_send(uint8_t type, const uint8_t *p, uint16_t n)
+{
+    if (kmbox_tx_room() < (n + TLM_TX_SLACK)) { s_tx_ring_skip++; return; }
+    TF_Msg m;
+    TF_ClearMsg(&m);
+    m.type = type;
+    m.data = (uint8_t *)p;
+    m.len  = n;
+    TF_Send(&s_tf, &m);
+}
+
+static void stream_emit_axis(uint32_t now)
+{
+    if (s_str_axis.mode == 0 || (now - s_str_axis.last_ms) < s_str_axis.period_ms) return;
+    s_str_axis.last_ms = now;
+    uint8_t p[5] = {
+        (uint8_t)s_snap_dx, (uint8_t)(s_snap_dx >> 8),
+        (uint8_t)s_snap_dy, (uint8_t)(s_snap_dy >> 8),
+        (uint8_t)s_snap_wheel,
+    };
+    tlm_send(TYPE_TLM_AXIS, p, sizeof(p));
+}
+
+static void stream_emit_btn(uint32_t now)
+{
+    if (s_str_btn.mode == 0 || (now - s_str_btn.last_ms) < s_str_btn.period_ms) return;
+    s_str_btn.last_ms = now;
+    tlm_send(TYPE_TLM_BUTTONS, &s_snap_buttons, 1);
+}
+
+static void stream_emit_mouse(uint32_t now)
+{
+    if (s_str_mouse.mode == 0 || (now - s_str_mouse.last_ms) < s_str_mouse.period_ms) return;
+    s_str_mouse.last_ms = now;
+    uint8_t p[8] = {
+        s_snap_buttons,
+        (uint8_t)s_snap_dx, (uint8_t)(s_snap_dx >> 8),
+        (uint8_t)s_snap_dy, (uint8_t)(s_snap_dy >> 8),
+        (uint8_t)s_snap_wheel,
+        0, 0,  // pan, tilt — no source
+    };
+    tlm_send(TYPE_TLM_MOUSE, p, sizeof(p));
+}
+
+static void stream_emit_kb(uint32_t now)
+{
+    if (s_str_kb.mode == 0 || (now - s_str_kb.last_ms) < s_str_kb.period_ms) return;
+    s_str_kb.last_ms = now;
+    uint8_t p[7];
+    p[0] = g_kb_modifier;
+    memcpy(&p[1], s_snap_keys, 6);
+    tlm_send(TYPE_TLM_KB, p, sizeof(p));
+}
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -683,7 +743,12 @@ void hurra_tick(void)
 {
     uint32_t now = millis();
     TF_Tick(&s_tf);
-    // Auto-stats push, stream emits, deferred actions land here in later tasks.
+
+    stream_emit_axis(now);
+    stream_emit_btn(now);
+    stream_emit_mouse(now);
+    stream_emit_kb(now);
+
     if (s_catch.active && now >= s_catch.deadline) {
         uint8_t p[8];
         memcpy(&p[0], &s_catch.accum_x, 4);
@@ -706,10 +771,37 @@ void hurra_tick(void)
     }
 }
 
-void hurra_notify_buttons(uint8_t buttons) { s_snap_buttons = buttons; }
+void hurra_notify_buttons(uint8_t buttons)
+{
+    s_snap_buttons = buttons;
+    if (s_cb_buttons && buttons != s_last_btn_emitted) {
+        s_last_btn_emitted = buttons;
+        tlm_send(TYPE_TLM_BUTTONS, &buttons, 1);
+    }
+}
+
 void hurra_notify_axes(int16_t dx, int16_t dy, int8_t scroll)
 {
     s_snap_dx = dx; s_snap_dy = dy; s_snap_wheel = scroll;
     if (s_catch.active) { s_catch.accum_x += dx; s_catch.accum_y += dy; }
+    if (s_cb_axes) {
+        uint8_t p[5] = {
+            (uint8_t)dx, (uint8_t)(dx >> 8),
+            (uint8_t)dy, (uint8_t)(dy >> 8),
+            (uint8_t)scroll,
+        };
+        tlm_send(TYPE_TLM_AXIS, p, sizeof(p));
+    }
 }
-void hurra_notify_keys(const uint8_t keys[6]) { memcpy(s_snap_keys, keys, 6); }
+
+void hurra_notify_keys(const uint8_t keys[6])
+{
+    memcpy(s_snap_keys, keys, 6);
+    if (s_cb_keys && memcmp(keys, s_last_keys_emitted, 6) != 0) {
+        memcpy(s_last_keys_emitted, keys, 6);
+        uint8_t p[7];
+        p[0] = g_kb_modifier;
+        memcpy(&p[1], keys, 6);
+        tlm_send(TYPE_TLM_KB, p, sizeof(p));
+    }
+}
