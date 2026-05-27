@@ -92,6 +92,12 @@ static void km_uart_idle_isr(void)
 static uint8_t dma_rx_ring[DMA_RX_RING_SIZE]
 	__attribute__((section(".dmabuffers"), aligned(DMA_RX_RING_SIZE)));
 static volatile uint16_t rx_tail;
+// Driver-level overrun: HW write pointer has lapped (or nearly lapped) the SW
+// read pointer between successive kmbox_poll_heavy() invocations. The eDMA
+// circular buffer keeps writing regardless, so the only signal we have is the
+// gap shrinking past a safety threshold. Distinct from kmbox_uart_overrun()
+// which counts LPUART STAT.OR (FIFO-level overrun caught by the peripheral).
+static uint32_t rx_drv_overrun_count;
 
 #define TX_RING_SIZE 256
 static uint8_t tx_ring[TX_RING_SIZE];
@@ -360,6 +366,7 @@ void kmbox_init(void)
 	uart_overrun_count = 0;
 	uart_framing_count = 0;
 	uart_noise_count = 0;
+	rx_drv_overrun_count = 0;
 
 	cached_mouse_ep = 0;
 	cached_mouse_maxpkt = 0;
@@ -692,6 +699,19 @@ void kmbox_poll_heavy(void)
 		link_last_rx_time = millis();
 		last_rx_activity_time = link_last_rx_time;
 	}
+	// Driver-overrun heuristic: if the HW pointer has run ≥3/4 of the ring
+	// ahead of the SW read pointer, we almost certainly lost bytes (DMA wraps
+	// silently). Count the event, skip the stale bytes by snapping rp to wp,
+	// and reset the parser so the next valid frame realigns cleanly.
+	{
+		uint16_t gap = (uint16_t)((head - rx_tail) & (DMA_RX_RING_SIZE - 1));
+		if (__builtin_expect(gap > (DMA_RX_RING_SIZE * 3u / 4u), 0)) {
+			rx_drv_overrun_count++;
+			rx_tail = head;
+			ferrum_reset();
+			GPIO1_DR_TOGGLE = STATUS_LED_BIT;
+		}
+	}
 	while (rx_tail != head) {
 		uint8_t b = dma_rx_ring[rx_tail];
 		rx_tail = (rx_tail + 1) & (DMA_RX_RING_SIZE - 1);
@@ -1006,6 +1026,7 @@ uint32_t kmbox_uart_overrun(void) { return uart_overrun_count; }
 uint32_t kmbox_uart_framing(void) { return uart_framing_count; }
 uint32_t kmbox_uart_noise(void) { return uart_noise_count; }
 uint32_t kmbox_tx_overflow(void) { return tx_overflow_count; }
+uint32_t kmbox_rx_drv_overrun(void) { return rx_drv_overrun_count; }
 
 uint16_t kmbox_tx_room(void)
 {
