@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "desc_capture.h"
-#include "ferrum.h"
+#include "proto.h"
 
 void kmbox_init(void);
 

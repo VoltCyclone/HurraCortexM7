@@ -4,6 +4,7 @@
 #include "hurra.h"
 #include "actions.h"
 #include "kmbox.h"
+#include "imxrt.h"
 #include <string.h>
 
 extern uint32_t millis(void);
@@ -109,8 +110,7 @@ void hurra_tick(void)
     TF_Tick(&s_tf);
     // Auto-stats push, stream emits, deferred actions land here in later tasks.
     if (s_reboot_at && now >= s_reboot_at) {
-        extern volatile uint32_t SCB_AIRCR;
-        SCB_AIRCR = 0x05FA0004;
+        SCB_AIRCR = 0x05FA0004;  // ARM SYSRESETREQ (macro from imxrt.h)
     }
 }
 

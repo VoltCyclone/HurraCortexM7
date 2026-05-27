@@ -355,7 +355,7 @@ void kmbox_init(void)
 
 	tx_head = 0;
 	tx_tail_pos = 0;
-	// ferrum_reset() not called here — ferrum_init() below zeroes the same
+	// proto_reset() not called here — proto_init() below zeroes the same
 	// fields (plus callback state).  Reset remains in error paths only.
 	memset(&inject, 0, sizeof(inject));
 	frames_ok = 0;
@@ -378,8 +378,8 @@ void kmbox_init(void)
 	link_last_rx_time = 0;
 	last_rx_activity_time = 0;
 
-	ferrum_set_tx(uart_tx_frame);
-	ferrum_init();
+	proto_set_tx(uart_tx_frame);
+	proto_init();
 	smooth_init(1000); // default 1kHz, main.c re-inits with actual rate
 }
 
@@ -640,7 +640,7 @@ void kmbox_poll_fast(void)
 	}
 
 	// Drive catch_xy deadline check even when no UART RX is arriving.
-	ferrum_tick();
+	proto_tick();
 
 	if (__builtin_expect(inject.click_release_at != 0, 0) && millis() >= inject.click_release_at) {
 		inject.mouse_buttons &= ~inject.click_release_mask;
@@ -688,7 +688,7 @@ void kmbox_poll_heavy(void)
 		if (stat & LPUART_STAT_NF) uart_noise_count++;
 		KM_UART_STAT = stat & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF);
 		if (stat & (LPUART_STAT_OR | LPUART_STAT_FE)) {
-			ferrum_reset();
+			proto_reset();
 		}
 		GPIO1_DR_TOGGLE = STATUS_LED_BIT;
 	}
@@ -708,7 +708,7 @@ void kmbox_poll_heavy(void)
 		if (__builtin_expect(gap > (DMA_RX_RING_SIZE * 3u / 4u), 0)) {
 			rx_drv_overrun_count++;
 			rx_tail = head;
-			ferrum_reset();
+			proto_reset();
 			GPIO1_DR_TOGGLE = STATUS_LED_BIT;
 		}
 	}
@@ -716,7 +716,7 @@ void kmbox_poll_heavy(void)
 		uint8_t b = dma_rx_ring[rx_tail];
 		rx_tail = (rx_tail + 1) & (DMA_RX_RING_SIZE - 1);
 		rx_bytes_total++;
-		ferrum_feed_byte(b);
+		proto_feed_byte(b);
 		if (b == '\r' || b == '\n') {
 			tx_flush();
 			frames_ok++;
@@ -745,7 +745,7 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 
 			if (__builtin_expect(mouse_layout.fast_path && rid == mouse_layout.report_id, 1)) {
 				report[doff] |= inject.mouse_buttons;
-				ferrum_notify_buttons(report[doff]);
+				proto_notify_buttons(report[doff]);
 
 				if (mouse_layout.x_is16) {
 					int32_t rx = (int16_t)(report[mouse_layout.x_byte] |
@@ -799,7 +799,7 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 					// callback sees the actual scroll value, not 0.
 				}
 
-				ferrum_notify_axes(inject.mouse_dx, inject.mouse_dy,
+				proto_notify_axes(inject.mouse_dx, inject.mouse_dy,
 				                   inject.mouse_wheel);
 				if (mouse_layout.w_byte != 0xFF)
 					inject.mouse_wheel = 0;
@@ -826,7 +826,7 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 
 	if (rid == mouse_layout.report_id) {
 		report[doff] |= inject.mouse_buttons;
-		ferrum_notify_buttons(report[doff]);
+		proto_notify_buttons(report[doff]);
 
 		int32_t rx = read_report_field(report, len, mouse_layout.x_bit,
 		                               mouse_layout.x_size, doff);
@@ -859,7 +859,7 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 		wheel_consumed = true;
 	}
 
-	ferrum_notify_axes(inject.mouse_dx, inject.mouse_dy,
+	proto_notify_axes(inject.mouse_dx, inject.mouse_dy,
 	                   inject.mouse_wheel);
 	inject.mouse_dx = 0;
 	inject.mouse_dy = 0;
@@ -892,7 +892,7 @@ static void kmbox_merge_keyboard(uint8_t *report, uint8_t len)
 			}
 		}
 	}
-	ferrum_notify_keys(&report[2]);
+	proto_notify_keys(&report[2]);
 }
 
 __attribute__((cold, noinline))
