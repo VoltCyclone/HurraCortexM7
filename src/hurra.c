@@ -205,6 +205,88 @@ static TF_Result l_stats(TinyFrame *tf, TF_Msg *msg)
     return TF_STAY;
 }
 
+// ── mouse listeners ───────────────────────────────────────────────────────────
+
+static TF_Result l_mouse_move(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
+    int16_t dx = rd_i16le(&msg->data[0]);
+    int16_t dy = rd_i16le(&msg->data[2]);
+    act_move(dx, dy, false);
+    return TF_STAY;
+}
+
+static TF_Result l_mouse_move_smooth(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), true);
+    return TF_STAY;
+}
+
+static TF_Result l_mouse_silent(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), false);
+    return TF_STAY;
+}
+
+static TF_Result l_mouse_mo(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 8) { s_payload_invalid++; return TF_STAY; }
+    uint8_t buttons = msg->data[0];
+    int16_t dx = rd_i16le(&msg->data[1]);
+    int16_t dy = rd_i16le(&msg->data[3]);
+    int8_t  wheel = (int8_t)msg->data[5];
+    // pan/tilt (data[6], data[7]) accepted but dropped — no HID transport.
+    act_button_set(buttons ^ g_buttons, 0);
+    act_button_set(buttons, 1);
+    act_move(dx, dy, false);
+    if (wheel) act_wheel(wheel);
+    return TF_STAY;
+}
+
+static TF_Result l_mouse_click(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 3) { s_payload_invalid++; return TF_STAY; }
+    // payload: [button:u8, count:u8, delay_ms:u8] (actions.c signature)
+    act_click(msg->data[0], msg->data[1], msg->data[2]);
+    return TF_STAY;
+}
+
+static TF_Result l_mouse_wheel(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    act_wheel((int8_t)msg->data[0]);
+    return TF_STAY;
+}
+
+static TF_Result l_mouse_getpos(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    int32_t x = g_pos_x, y = g_pos_y;
+    if (x > INT16_MAX) x = INT16_MAX; else if (x < INT16_MIN) x = INT16_MIN;
+    if (y > INT16_MAX) y = INT16_MAX; else if (y < INT16_MIN) y = INT16_MIN;
+    uint8_t p[4] = {
+        (uint8_t)x, (uint8_t)(x >> 8),
+        (uint8_t)y, (uint8_t)(y >> 8),
+    };
+    send_reply(msg, p, sizeof(p));
+    return TF_STAY;
+}
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -234,6 +316,14 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_PING,    l_ping);
     TF_AddTypeListener(&s_tf, TYPE_VERSION, l_version);
     TF_AddTypeListener(&s_tf, TYPE_STATS,   l_stats);
+    // Mouse listeners (Task 4.3)
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_MOVE,        l_mouse_move);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_MOVE_SMOOTH, l_mouse_move_smooth);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_SILENT_MOVE, l_mouse_silent);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_MO,          l_mouse_mo);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_CLICK,       l_mouse_click);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_WHEEL,       l_mouse_wheel);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_GETPOS,      l_mouse_getpos);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
