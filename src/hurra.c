@@ -436,6 +436,65 @@ static TF_Result l_kb_multiup(TinyFrame *tf, TF_Msg *m)
 static TF_Result l_kb_multipress(TinyFrame *tf, TF_Msg *m)
 { return multikey_listener(tf, m, kb_press_default); }
 
+// ── lock listeners + catch_xy ────────────────────────────────────────────────
+
+static TF_Result lock_listener(TinyFrame *tf, TF_Msg *msg, uint8_t bit)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    extern uint16_t g_lock_mask;
+    uint16_t bitmask = (uint16_t)(1u << bit);
+    if (msg->len == 0) {
+        uint8_t v = (g_lock_mask & bitmask) ? 1 : 0;
+        send_reply(msg, &v, 1);
+        return TF_STAY;
+    }
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    if (msg->data[0]) g_lock_mask |= bitmask;
+    else              g_lock_mask &= ~bitmask;
+    return TF_STAY;
+}
+
+#define MAKE_LOCK(NAME, BIT) \
+static TF_Result l_##NAME(TinyFrame *tf, TF_Msg *m) { return lock_listener(tf, m, BIT); }
+
+MAKE_LOCK(lock_ml,  0)
+MAKE_LOCK(lock_mr,  1)
+MAKE_LOCK(lock_mm,  2)
+MAKE_LOCK(lock_ms1, 3)
+MAKE_LOCK(lock_ms2, 4)
+MAKE_LOCK(lock_mx,  5)
+MAKE_LOCK(lock_my,  6)
+
+static TF_Result l_catch_xy(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 2) { s_payload_invalid++; return TF_STAY; }
+    uint16_t dur = rd_u16le(&msg->data[0]);
+    if (dur > 1000) dur = 1000;
+
+    // Re-entrant: emit prior result to its original requester first.
+    if (s_catch.active) {
+        uint8_t p[8];
+        memcpy(&p[0], &s_catch.accum_x, 4);
+        memcpy(&p[4], &s_catch.accum_y, 4);
+        TF_Msg r;
+        TF_ClearMsg(&r);
+        r.type = TYPE_CATCH_XY;
+        r.frame_id = s_catch.reply_id;
+        r.is_response = true;
+        r.data = p; r.len = 8;
+        TF_Respond(&s_tf, &r);
+    }
+    s_catch.accum_x = 0;
+    s_catch.accum_y = 0;
+    s_catch.deadline = millis() + (uint32_t)dur;
+    s_catch.reply_id = msg->frame_id;
+    s_catch.active = true;
+    return TF_STAY;
+}
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -491,6 +550,14 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_KB_MULTIDOWN,  l_kb_multidown);
     TF_AddTypeListener(&s_tf, TYPE_KB_MULTIUP,    l_kb_multiup);
     TF_AddTypeListener(&s_tf, TYPE_KB_MULTIPRESS, l_kb_multipress);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_ML,  l_lock_ml);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_MR,  l_lock_mr);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_MM,  l_lock_mm);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_MS1, l_lock_ms1);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_MS2, l_lock_ms2);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_MX,  l_lock_mx);
+    TF_AddTypeListener(&s_tf, TYPE_LOCK_MY,  l_lock_my);
+    TF_AddTypeListener(&s_tf, TYPE_CATCH_XY, l_catch_xy);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
@@ -503,6 +570,19 @@ void hurra_tick(void)
     uint32_t now = millis();
     TF_Tick(&s_tf);
     // Auto-stats push, stream emits, deferred actions land here in later tasks.
+    if (s_catch.active && now >= s_catch.deadline) {
+        uint8_t p[8];
+        memcpy(&p[0], &s_catch.accum_x, 4);
+        memcpy(&p[4], &s_catch.accum_y, 4);
+        TF_Msg r;
+        TF_ClearMsg(&r);
+        r.type = TYPE_CATCH_XY;
+        r.frame_id = s_catch.reply_id;
+        r.is_response = true;
+        r.data = p; r.len = 8;
+        TF_Respond(&s_tf, &r);
+        s_catch.active = false;
+    }
     if (s_reboot_at && now >= s_reboot_at) {
         SCB_AIRCR = 0x05FA0004;  // ARM SYSRESETREQ (macro from imxrt.h)
     }
