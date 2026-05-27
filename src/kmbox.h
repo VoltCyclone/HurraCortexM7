@@ -38,3 +38,4 @@ uint32_t kmbox_tx_overflow(void);   // bytes dropped when tx_ring was full
 uint8_t  kmbox_protocol_mode(void); // 0=idle, 1=Ferrum
 void     kmbox_set_baud(uint32_t baud);
 uint32_t kmbox_current_baud(void);
+uint16_t kmbox_tx_room(void);  // bytes free in TX ring; used by hurra telemetry backpressure

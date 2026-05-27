@@ -1006,6 +1006,14 @@ uint32_t kmbox_uart_overrun(void) { return uart_overrun_count; }
 uint32_t kmbox_uart_framing(void) { return uart_framing_count; }
 uint32_t kmbox_uart_noise(void) { return uart_noise_count; }
 uint32_t kmbox_tx_overflow(void) { return tx_overflow_count; }
+
+uint16_t kmbox_tx_room(void)
+{
+    // Returns bytes free in TX ring. Telemetry emitters use this to skip
+    // a frame when the ring would overflow; input listeners never skip.
+    uint16_t used = (uint16_t)((tx_head - tx_tail_pos) & (TX_RING_SIZE - 1));
+    return (uint16_t)(TX_RING_SIZE - 1 - used);
+}
 uint8_t  kmbox_protocol_mode(void) { return detected_proto; }
 __attribute__((section(".fastrun")))
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
