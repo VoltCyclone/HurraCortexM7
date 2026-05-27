@@ -9,6 +9,70 @@
 
 extern uint32_t millis(void);
 
+// ── Command TYPE byte allocation (see spec §3) ──────────────────────────────
+enum {
+    // 0x00–0x0F admin
+    TYPE_PING        = 0x00,
+    TYPE_VERSION     = 0x01,
+    TYPE_STATS       = 0x02,
+    TYPE_INIT        = 0x03,
+    TYPE_REBOOT      = 0x04,
+    TYPE_BAUD        = 0x05,
+    TYPE_SCREEN      = 0x06,
+    // 0x10–0x2F mouse
+    TYPE_MOUSE_MOVE        = 0x10,
+    TYPE_MOUSE_MOVE_SMOOTH = 0x11,
+    TYPE_MOUSE_SILENT_MOVE = 0x12,
+    TYPE_MOUSE_MO          = 0x13,
+    TYPE_MOUSE_CLICK       = 0x14,
+    TYPE_MOUSE_WHEEL       = 0x15,
+    TYPE_MOUSE_GETPOS      = 0x16,
+    TYPE_INVERT_X          = 0x17,
+    TYPE_INVERT_Y          = 0x18,
+    TYPE_SWAP_XY           = 0x19,
+    TYPE_BTN_LEFT          = 0x20,
+    TYPE_BTN_RIGHT         = 0x21,
+    TYPE_BTN_MIDDLE        = 0x22,
+    TYPE_BTN_SIDE1         = 0x23,
+    TYPE_BTN_SIDE2         = 0x24,
+    // 0x40–0x4F keyboard
+    TYPE_KB_DOWN        = 0x40,
+    TYPE_KB_UP          = 0x41,
+    TYPE_KB_PRESS       = 0x42,
+    TYPE_KB_ISDOWN      = 0x43,
+    TYPE_KB_MASK        = 0x44,
+    TYPE_KB_STRING      = 0x45,
+    TYPE_KB_MULTIDOWN   = 0x46,
+    TYPE_KB_MULTIUP     = 0x47,
+    TYPE_KB_MULTIPRESS  = 0x48,
+    // 0x60–0x6F locks + catch
+    TYPE_LOCK_ML  = 0x60,
+    TYPE_LOCK_MR  = 0x61,
+    TYPE_LOCK_MM  = 0x62,
+    TYPE_LOCK_MS1 = 0x63,
+    TYPE_LOCK_MS2 = 0x64,
+    TYPE_LOCK_MX  = 0x65,
+    TYPE_LOCK_MY  = 0x66,
+    TYPE_CATCH_XY = 0x67,
+    // 0x70–0x7F streams + callbacks
+    TYPE_STREAM_AXIS  = 0x70,
+    TYPE_STREAM_BTN   = 0x71,
+    TYPE_STREAM_MOUSE = 0x72,
+    TYPE_STREAM_KB    = 0x73,
+    TYPE_CB_BUTTONS   = 0x74,
+    TYPE_CB_AXES      = 0x75,
+    TYPE_CB_KEYS      = 0x76,
+    // 0x80–0x8F unsolicited telemetry
+    TYPE_TLM_AXIS    = 0x80,
+    TYPE_TLM_BUTTONS = 0x81,
+    TYPE_TLM_MOUSE   = 0x82,
+    TYPE_TLM_KB      = 0x83,
+    TYPE_TLM_STATS   = 0x84,
+    TYPE_TLM_LOG     = 0x85,
+};
+
+#define HURRA_IDENTITY "kmbox: Hurra v1"
+
 // ── TinyFrame instance ──────────────────────────────────────────────────────
 static TinyFrame s_tf;
 static hurra_tx_fn s_tx;
@@ -69,6 +133,29 @@ static inline int16_t  rd_i16le(const uint8_t *p) { return (int16_t)(p[0] | (p[1
 static inline uint16_t rd_u16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
 static inline uint32_t rd_u32le(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+static void send_reply(TF_Msg *req, const uint8_t *data, uint32_t len)
+{
+    TF_Msg r = *req;
+    r.data = (uint8_t *)data;
+    r.len  = (TF_LEN)len;
+    r.is_response = true;
+    TF_Respond(&s_tf, &r);
+}
+
+// Track ID gap for stats (called by every listener)
+static void track_id(uint8_t id)
+{
+    s_rx_frames_ok++;
+    if (s_have_last_id) {
+        uint8_t gap = (uint8_t)((id - s_last_rx_id - 1) & 0xFFu);
+        s_id_gap_total += gap;
+    }
+    s_last_rx_id = id;
+    s_have_last_id = true;
 }
 
 // ── public API ──────────────────────────────────────────────────────────────
