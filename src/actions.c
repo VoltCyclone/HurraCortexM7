@@ -32,6 +32,10 @@ static uint8_t  g_masked_keys[ACT_MAX_DISABLED_KEYS];
 static uint8_t  g_masked_modes[ACT_MAX_DISABLED_KEYS];
 static uint8_t  g_masked_count;
 
+static bool s_invert_x = false;
+static bool s_invert_y = false;
+static bool s_swap_xy  = false;
+
 static uint8_t btn_idx_to_mask(uint8_t idx)
 {
 	if (idx >= 1 && idx <= 5)
@@ -86,6 +90,9 @@ void act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms)
 
 void act_move(int16_t dx, int16_t dy, bool smooth)
 {
+	if (s_swap_xy)  { int16_t t = dx; dx = dy; dy = t; }
+	if (s_invert_x) dx = (int16_t)-dx;
+	if (s_invert_y) dy = (int16_t)-dy;
 	g_pos_x += dx;
 	g_pos_y += dy;
 	if (smooth) smooth_inject(dx, dy);
@@ -174,3 +181,17 @@ void act_kb_mask(uint8_t key, uint8_t mode)
 		}
 	}
 }
+
+// ── wheel / invert / swap ────────────────────────────────────────────────────
+
+void act_wheel(int8_t ticks)
+{
+	kmbox_inject_mouse(0, 0, g_buttons, ticks, false);
+}
+
+bool act_get_invert_x(void) { return s_invert_x; }
+void act_set_invert_x(bool on) { s_invert_x = on; }
+bool act_get_invert_y(void) { return s_invert_y; }
+void act_set_invert_y(bool on) { s_invert_y = on; }
+bool act_get_swap_xy(void)  { return s_swap_xy; }
+void act_set_swap_xy(bool on) { s_swap_xy = on; }

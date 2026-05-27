@@ -22,3 +22,13 @@ void    act_kb_press(uint8_t key, uint32_t delay_ms);
 uint8_t act_kb_isdown(uint8_t key);
 void    act_kb_init(void);
 void    act_kb_mask(uint8_t key, uint8_t mode);
+
+void act_wheel(int8_t ticks);
+
+bool act_get_invert_x(void);
+void act_set_invert_x(bool on);
+bool act_get_invert_y(void);
+void act_set_invert_y(bool on);
+
+bool act_get_swap_xy(void);
+void act_set_swap_xy(bool on);
