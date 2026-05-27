@@ -334,6 +334,108 @@ static TF_Result l_invert_y(TinyFrame *tf, TF_Msg *m)
 static TF_Result l_swap_xy(TinyFrame *tf, TF_Msg *m)
 { return invert_listener(tf, m, act_get_swap_xy, act_set_swap_xy); }
 
+// ── keyboard listeners ────────────────────────────────────────────────────────
+
+static TF_Result l_kb_down(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    act_kb_down(msg->data[0]);
+    return TF_STAY;
+}
+
+static TF_Result l_kb_up(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    act_kb_up(msg->data[0]);
+    return TF_STAY;
+}
+
+// xorshift32 jitter for KB_PRESS rand_ms
+static uint32_t s_rng_state = 0xDEADBEEF;
+static uint32_t rng_next(void)
+{
+    uint32_t x = s_rng_state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    return s_rng_state = x;
+}
+
+static TF_Result l_kb_press(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 3) { s_payload_invalid++; return TF_STAY; }
+    uint32_t delay = msg->data[1] + (msg->data[2] ? (rng_next() % (msg->data[2] + 1u)) : 0);
+    act_kb_press(msg->data[0], delay);
+    return TF_STAY;
+}
+
+static TF_Result l_kb_isdown(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    uint8_t v = act_kb_isdown(msg->data[0]);
+    send_reply(msg, &v, 1);
+    return TF_STAY;
+}
+
+static TF_Result l_kb_mask(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 2) { s_payload_invalid++; return TF_STAY; }
+    act_kb_mask(msg->data[0], msg->data[1]);
+    return TF_STAY;
+}
+
+// ASCII → HID (lowercase letters, digits, space). Other chars dropped.
+#define STRING_PRESS_MS 12
+static uint8_t ascii_to_hid(char c)
+{
+    if (c >= 'a' && c <= 'z') return 0x04 + (c - 'a');
+    if (c >= 'A' && c <= 'Z') return 0x04 + (c - 'A');
+    if (c >= '1' && c <= '9') return 0x1E + (c - '1');
+    if (c == '0') return 0x27;
+    if (c == ' ') return 0x2C;
+    return 0;
+}
+
+static TF_Result l_kb_string(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len > 240) { s_payload_invalid++; return TF_STAY; }
+    for (uint16_t i = 0; i < msg->len; i++) {
+        uint8_t hid = ascii_to_hid((char)msg->data[i]);
+        if (hid) act_kb_press(hid, STRING_PRESS_MS);
+    }
+    return TF_STAY;
+}
+
+static TF_Result multikey_listener(TinyFrame *tf, TF_Msg *msg,
+                                   void (*op)(uint8_t))
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len < 1 || msg->len > 6) { s_payload_invalid++; return TF_STAY; }
+    for (uint16_t i = 0; i < msg->len; i++) op(msg->data[i]);
+    return TF_STAY;
+}
+
+static void kb_press_default(uint8_t k) { act_kb_press(k, 80); }
+static void kb_down_void(uint8_t k) { (void)act_kb_down(k); }
+
+static TF_Result l_kb_multidown(TinyFrame *tf, TF_Msg *m)
+{ return multikey_listener(tf, m, kb_down_void); }
+static TF_Result l_kb_multiup(TinyFrame *tf, TF_Msg *m)
+{ return multikey_listener(tf, m, act_kb_up); }
+static TF_Result l_kb_multipress(TinyFrame *tf, TF_Msg *m)
+{ return multikey_listener(tf, m, kb_press_default); }
+
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -380,6 +482,15 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_INVERT_X,   l_invert_x);
     TF_AddTypeListener(&s_tf, TYPE_INVERT_Y,   l_invert_y);
     TF_AddTypeListener(&s_tf, TYPE_SWAP_XY,    l_swap_xy);
+    TF_AddTypeListener(&s_tf, TYPE_KB_DOWN,       l_kb_down);
+    TF_AddTypeListener(&s_tf, TYPE_KB_UP,         l_kb_up);
+    TF_AddTypeListener(&s_tf, TYPE_KB_PRESS,      l_kb_press);
+    TF_AddTypeListener(&s_tf, TYPE_KB_ISDOWN,     l_kb_isdown);
+    TF_AddTypeListener(&s_tf, TYPE_KB_MASK,       l_kb_mask);
+    TF_AddTypeListener(&s_tf, TYPE_KB_STRING,     l_kb_string);
+    TF_AddTypeListener(&s_tf, TYPE_KB_MULTIDOWN,  l_kb_multidown);
+    TF_AddTypeListener(&s_tf, TYPE_KB_MULTIUP,    l_kb_multiup);
+    TF_AddTypeListener(&s_tf, TYPE_KB_MULTIPRESS, l_kb_multipress);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
