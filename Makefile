@@ -11,7 +11,7 @@ MCU_FLAGS = -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb
 CMD_BAUD ?= 115200
 
 # Protocol selector: 'hurra' (binary, TinyFrame, 4 Mbps target) or 'ferrum' (ASCII).
-PROTOCOL ?= ferrum
+PROTOCOL ?= hurra
 
 ifeq ($(PROTOCOL),hurra)
   PROTO_DEF = -DPROTOCOL_HURRA
