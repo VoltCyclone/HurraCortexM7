@@ -1,8 +1,8 @@
 # imxrtnsy
 
-Bare-metal USB HID man-in-the-middle firmware for the **SparkFun MicroMod Teensy** (NXP i.MX RT1062). Enumerates a real USB HID device on the host port, replays it on the device port to the Mac/PC, and accepts **Ferrum text protocol** commands over UART to inject mouse/keyboard input on top of the live HID stream.
+Bare-metal USB HID man-in-the-middle firmware for the **SparkFun MicroMod Teensy** (NXP i.MX RT1062). Enumerates a real USB HID device on the host port, replays it on the device port to the Mac/PC, and accepts **Hurra binary protocol** commands over UART to inject mouse/keyboard input on top of the live HID stream.
 
-Drop-in compatible with software written for the [Ferrum](https://ferrumllc.github.io/) and km.box B-family devices.
+Drop-in compatible with software written for the [Ferrum](https://ferrumllc.github.io/) and km.box B-family devices. The Ferrum ASCII protocol is still supported as an opt-in (`PROTOCOL=ferrum`).
 
 ## Hardware
 
@@ -22,6 +22,10 @@ Drop-in compatible with software written for the [Ferrum](https://ferrumllc.gith
 ```
 
 ## Wire protocol
+
+The default protocol is **Hurra** — a TinyFrame-based binary protocol targeting ≥8 k commands/sec at 4 Mbps. The legacy **Ferrum** ASCII protocol (`km.<cmd>(…)\r\n`, 115200 baud) is available via `make PROTOCOL=ferrum`.
+
+### Ferrum (ASCII, opt-in: `make PROTOCOL=ferrum`)
 
 ASCII text, `\r\n`-terminated, 115200 baud (resets to 115200 every power cycle). No echo, no `>>> ` prompt. Reference: <https://ferrumllc.github.io/print.html>.
 
@@ -44,8 +48,9 @@ Full command surface: `version`, `move`, `m`, `left`/`right`/`middle`/`side1`/`s
 ## Build & flash
 
 ```sh
-make           # produces firmware.hex
-make flash     # flashes via teensy_loader_cli
+make                    # produces firmware.hex (Hurra protocol, default)
+make PROTOCOL=ferrum    # opt-in: Ferrum ASCII protocol
+make flash              # flashes via teensy_loader_cli
 ```
 
 Requires:

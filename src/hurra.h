@@ -1,4 +1,4 @@
-// src/hurra.h — public API mirrors ferrum.h / makcu.h so proto.h can alias.
+// src/hurra.h — public API mirrors ferrum.h shape so proto.h can alias.
 #pragma once
 
 #include <stdint.h>

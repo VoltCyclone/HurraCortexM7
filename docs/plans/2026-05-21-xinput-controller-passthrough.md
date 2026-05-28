@@ -5,7 +5,7 @@ Status: planned, awaiting implementation green light.
 ## Goal
 
 Add Xbox One / Xbox Series controller passthrough to the existing USB MITM firmware,
-with PC-driven injection over the existing Ferrum / MAKCU UART link.
+with PC-driven injection over the existing Ferrum / Hurra UART link.
 
 Topology:
 
@@ -44,10 +44,12 @@ frames (0x20).
 
 ## v1 command surface
 
-Both Ferrum (ASCII) and MAKCU (binary) protocols expose the same primitives. Mouse/kb
+Both Ferrum (ASCII) and Hurra (binary) protocols expose the same primitives. Mouse/kb
 commands are simply absent in PAD-mode firmware builds.
 
-| Ferrum | MAKCU opcode | Meaning |
+> **Superseded by Hurra protocol** — MAKCU has been removed. See [Hurra binary protocol spec](../specs/2026-05-23-hurra-binary-protocol-design.md) for the binary opcode surface.
+
+| Ferrum | Hurra opcode | Meaning |
 |---|---|---|
 | `km.btn(mask, action)` | 0xC0 | Press (action=1) or release (action=0) buttons in `mask`. Held until released. |
 | `km.btn(mask)` | 0xC0 get | Return current PC-controlled state of those bits |
@@ -112,7 +114,7 @@ in the wild); the class byte is stable.
   reusable macro consumed across the codebase. Plus an `#error` guard for missing/invalid
   selection.
 - `src/gp_xinput.h` — public API and constants:
-  - `GIP_REPORT_LEN`, `GIP_OFF_*` byte offsets, `GP_AXIS_*` IDs, MAKCU opcodes
+  - `GIP_REPORT_LEN`, `GIP_OFF_*` byte offsets, `GP_AXIS_*` IDs, Hurra opcodes
   - `bool gip_is_data_frame(const uint8_t *buf, uint8_t len)` (inline-candidate)
   - `void xinput_merge_report(uint8_t *buf, uint8_t len)`
   - `uint8_t xinput_build_synthetic(uint8_t *dst)`
@@ -166,7 +168,7 @@ in the wild); the class byte is stable.
     are dead-code in a PAD build because no caller invokes them and LTO eliminates them.
     If linker errors surface from references to `g_buttons` etc. that don't exist in PAD
     mode, wrap the affected handlers behind `#if !DEVICE_MODE_PAD`.
-- `src/makcu.c` — append `h_gp_btn`, `h_gp_axis`, `h_gp_btn_click`, `h_gp_reset` and
+- `src/hurra.c` — append `h_gp_btn`, `h_gp_axis`, `h_gp_btn_click`, `h_gp_reset` and
   switch cases 0xC0–0xC3 under same guard.
 - `Makefile`:
   ```make
@@ -247,10 +249,10 @@ the upstream left off rather than restarting from 1.
 All four combinations must compile clean:
 
 ```
-make DEVICE_MODE=MOUSE_KB PROTOCOL=FERRUM   # current default behavior
-make DEVICE_MODE=MOUSE_KB PROTOCOL=MAKCU    # current MAKCU
-make DEVICE_MODE=PAD      PROTOCOL=FERRUM   # XInput + Ferrum (new)
-make DEVICE_MODE=PAD      PROTOCOL=MAKCU    # XInput + MAKCU  (new)
+make DEVICE_MODE=MOUSE_KB PROTOCOL=hurra    # current default behavior
+make DEVICE_MODE=MOUSE_KB PROTOCOL=ferrum   # Ferrum ASCII opt-in
+make DEVICE_MODE=PAD      PROTOCOL=hurra    # XInput + Hurra (new)
+make DEVICE_MODE=PAD      PROTOCOL=ferrum   # XInput + Ferrum (new)
 ```
 
 ## Interface 1 (audio iso) and Interface 2 (bulk FW update)
@@ -292,7 +294,7 @@ Neither path is exercised during normal gaming. No work required in v1.
 6. `src/main.c` — `ep_mapping_t.iface_class`, SET_PROTOCOL guard, PIT guard,
    cache call switch, merge_report signature update.
 7. `src/ferrum.c` — `cmd_gp_*` handlers and dispatch entries.
-8. `src/makcu.c` — `h_gp_*` handlers and switch cases.
+8. `src/hurra.c` — `h_gp_*` handlers and switch cases.
 9. Build verification: all four combinations clean.
 10. Hardware bring-up (user): real XInput pad + Xbox console + UART host.
 
@@ -300,8 +302,8 @@ Neither path is exercised during normal gaming. No work required in v1.
 
 - `make DEVICE_MODE=MOUSE_KB PROTOCOL=FERRUM` produces a functionally identical
   build to the current default (no behavioral change to the mouse/kb path).
-- `make DEVICE_MODE=PAD PROTOCOL=FERRUM` builds and links without warnings.
-- `make DEVICE_MODE=PAD PROTOCOL=MAKCU` builds and links without warnings.
+- `make DEVICE_MODE=PAD PROTOCOL=hurra` builds and links without warnings.
+- `make DEVICE_MODE=PAD PROTOCOL=ferrum` builds and links without warnings.
 - (Future) Unit test for `gip_is_data_frame` and `xinput_merge_report` against
   a captured 18-byte Xbox frame buffer.
 
