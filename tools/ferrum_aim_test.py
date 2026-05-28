@@ -43,12 +43,13 @@ except ImportError:
 
 
 # Aim controller tuning
-HIT_THRESHOLD_PX = 15        # within this distance = target hit
-TIMEOUT_S        = 3.0       # give up on a target after this long
-TICK_MS          = 12        # period between km.move sends (~83 Hz)
-PULL_GAIN        = 0.35      # step size = clamp(dist * gain, 1, max)
-STEP_MAX_PX      = 40        # cap on per-tick movement
-COOLDOWN_MS      = 200       # idle pause between targets, lets cursor settle
+HIT_THRESHOLD_PX     = 15    # within this distance = target hit
+TIMEOUT_S            = 3.0   # give up on a target after this long
+TICK_MS_DEFAULT      = 6     # period between cursor-feedback ticks (~166 Hz)
+PULL_GAIN            = 0.35  # step size = clamp(dist * gain, 1, max)
+STEP_MAX_PX          = 40    # cap on per-tick movement (total budget)
+CMD_STEP_PX_DEFAULT  = 4     # max |dx|,|dy| per km.move(); larger tick steps are split
+COOLDOWN_MS          = 200   # idle pause between targets, lets cursor settle
 
 
 class Dot:
@@ -65,17 +66,34 @@ class Dot:
 
 
 def send_move(ser, dx, dy):
-    line = f"km.move({dx}, {dy})\r\n".encode("ascii")
-    try:
-        ser.write(line)
-    except serial.SerialTimeoutException:
-        pass  # firmware backpressure — drop this tick, next one will resend
+    # No try/except: write_timeout backpressure throttles the caller; we don't
+    # want to silently drop moves and lose the closed-loop signal.
+    ser.write(f"km.move({dx}, {dy})\r\n".encode("ascii"))
+
+
+def split_move(sx, sy, max_step):
+    """Yield (dx, dy) sub-moves summing to (sx, sy), each |axis| <= max_step.
+
+    Distributes the motion evenly across N sub-moves via cumulative rounding so
+    the path is straight and rounding error never exceeds 1 px.
+    """
+    n = max(1, (max(abs(sx), abs(sy)) + max_step - 1) // max_step)
+    prev_x = prev_y = 0
+    for i in range(1, n + 1):
+        cur_x = round(sx * i / n)
+        cur_y = round(sy * i / n)
+        yield cur_x - prev_x, cur_y - prev_y
+        prev_x, prev_y = cur_x, cur_y
 
 
 class AimTest:
-    def __init__(self, ser):
-        self.ser   = ser
-        self.mouse = MouseController()
+    def __init__(self, ser, tick_ms=TICK_MS_DEFAULT, cmd_step_px=CMD_STEP_PX_DEFAULT):
+        self.ser         = ser
+        self.tick_ms     = tick_ms
+        self.cmd_step_px = cmd_step_px
+        self.mouse       = MouseController()
+        self.sent        = 0
+        self.run_start_t = 0.0
 
         self.root = tk.Tk()
         self.root.title("Ferrum Aim Test")
@@ -143,6 +161,7 @@ class AimTest:
             self._reset_dots()
             self.state          = "running"
             self.current_idx    = 0
+            self.sent           = 0
             self.run_start_t    = time.monotonic()
             self._begin_target()
 
@@ -221,9 +240,11 @@ class AimTest:
             sx = 1 if dx > 0 else (-1 if dx < 0 else 0)
             sy = 1 if dy > 0 else (-1 if dy < 0 else 0)
 
-        send_move(self.ser, sx, sy)
+        for chunk_x, chunk_y in split_move(sx, sy, self.cmd_step_px):
+            send_move(self.ser, chunk_x, chunk_y)
+            self.sent += 1
         d.iterations += 1
-        self.root.after(TICK_MS, self._tick)
+        self.root.after(self.tick_ms, self._tick)
 
     def _after_cooldown(self):
         self.state = "running"
@@ -241,8 +262,11 @@ class AimTest:
             sum(d.iterations for d in self.dots if d.hit) / hits
             if hits else 0.0
         )
+        rps = self.sent / total if total else 0.0
         print(f"\n=== Run complete ===")
         print(f"Total time: {total:.2f} s")
+        print(f"Commands sent: {self.sent}  ({rps:,.0f} km.move/sec, "
+              f"tick_ms={self.tick_ms}, cmd_step_px={self.cmd_step_px})")
         print(f"Hits: {hits}/{len(self.dots)}")
         if hits:
             print(f"Avg time-to-hit: {avg_t * 1000:.0f} ms")
@@ -283,15 +307,109 @@ class AimTest:
         self.root.mainloop()
 
 
+def cmd_load(ser, n, mode):
+    """Throughput benchmark. Returns ops/sec."""
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+    if mode == "oneway":
+        payload = b"km.move(1, 0)\r\n"
+        t0 = time.perf_counter()
+        for _ in range(n):
+            try:
+                ser.write(payload)
+            except serial.SerialTimeoutException:
+                pass
+        ser.flush()
+        elapsed = time.perf_counter() - t0
+        rps = n / elapsed if elapsed else float("inf")
+        bps = (len(payload) * n * 8) / elapsed if elapsed else float("inf")
+        # Firmware processes one line per USB HID report (~1 kHz cap), so a 5000-cmd
+        # burst at 773 cmds/sec leaves a multi-second backlog. Poll km.version() until
+        # we get a clean reply or give up after 30 s.
+        drain_start = time.perf_counter()
+        drain_deadline = drain_start + 30.0
+        alive = False
+        drain_s = None
+        while time.perf_counter() < drain_deadline:
+            ser.reset_input_buffer()
+            ser.write(b"km.version()\r\n"); ser.flush()
+            ack = b""
+            probe_deadline = time.perf_counter() + 1.0
+            while time.perf_counter() < probe_deadline:
+                chunk = ser.read(64)
+                if chunk:
+                    ack += chunk
+                    if ack.endswith(b"\r\n"):
+                        break
+            if ack.strip().endswith(b"kmbox: Ferrum"):
+                alive = True
+                drain_s = time.perf_counter() - drain_start
+                break
+        print(f"\n[load:oneway] {n} km.move() in {elapsed*1000:.1f}ms")
+        print(f"    {rps:,.0f} cmds/sec   ({bps/1000:,.1f} kbps wire)")
+        if alive:
+            print(f"    firmware alive after burst: yes  (queue drained in {drain_s:.2f}s)")
+        else:
+            print(f"    firmware alive after burst: NO  (no reply within 30s — likely hung)")
+        return rps
+
+    payload = b"km.version()\r\n"
+    expected = b"kmbox: Ferrum\r\n"
+    lats_ms = []
+    fails = 0
+    t0 = time.perf_counter()
+    for _ in range(n):
+        t_send = time.perf_counter()
+        ser.write(payload); ser.flush()
+        buf = b""
+        deadline = time.perf_counter() + 0.5
+        while time.perf_counter() < deadline:
+            chunk = ser.read(64)
+            if chunk:
+                buf += chunk
+                if buf.endswith(b"\r\n"):
+                    break
+        if buf == expected:
+            lats_ms.append((time.perf_counter() - t_send) * 1000)
+        else:
+            fails += 1
+    elapsed = time.perf_counter() - t0
+    rps = n / elapsed if elapsed else float("inf")
+    print(f"\n[load:rtt] {n} round-trips in {elapsed*1000:.1f}ms")
+    print(f"    {rps:,.0f} rtt/sec   ({fails} failed)")
+    if lats_ms:
+        lats_ms.sort()
+        p = lambda q: lats_ms[min(len(lats_ms) - 1, int(len(lats_ms) * q))]
+        print(f"    latency ms: min={lats_ms[0]:.2f} "
+              f"med={p(0.50):.2f} p95={p(0.95):.2f} max={lats_ms[-1]:.2f}")
+    return rps
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("port", help="serial device, e.g. /dev/tty.usbserial-0001")
     ap.add_argument("--baud", type=int, default=115200)
+    ap.add_argument("--tick-ms", type=int, default=TICK_MS_DEFAULT,
+                    help=f"cursor-feedback period in ms (default {TICK_MS_DEFAULT})")
+    ap.add_argument("--cmd-step-px", type=int, default=CMD_STEP_PX_DEFAULT,
+                    help=f"max |dx|,|dy| per km.move() (default {CMD_STEP_PX_DEFAULT}); "
+                         "larger tick steps split into multiple sub-commands")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("aim", help="GUI closed-loop aim test (default)")
+    p = sub.add_parser("load", help="benchmark km.move() throughput and report cmds/sec")
+    p.add_argument("-n", type=int, default=1000, help="number of commands (default 1000)")
+    p.add_argument("--mode", choices=["oneway", "rtt"], default="oneway",
+                   help="oneway = fire-and-forget km.move() (default); rtt = round-trip km.version()")
     args = ap.parse_args()
 
-    ser = serial.Serial(args.port, args.baud, timeout=0.1, write_timeout=0.1)
-    AimTest(ser).run()
+    ser = serial.Serial(args.port, args.baud, timeout=0.1, write_timeout=5.0)
+    if args.cmd == "load":
+        cmd_load(ser, args.n, args.mode)
+        ser.close()
+        return
+    AimTest(ser, tick_ms=args.tick_ms, cmd_step_px=args.cmd_step_px).run()
 
 
 if __name__ == "__main__":

@@ -63,6 +63,62 @@ def cmd_isdown(ser, key):
     return send_line(ser, f"km.isdown({key})", expect_reply=True)
 
 
+def cmd_load(ser, n, mode):
+    """Load test. Returns ops/sec achieved."""
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+
+    if mode == "oneway":
+        payload = b"km.move(0, 0)\r\n"
+        t0 = time.perf_counter()
+        for _ in range(n):
+            ser.write(payload)
+        ser.flush()
+        elapsed = time.perf_counter() - t0
+        rps = n / elapsed if elapsed else float("inf")
+        bps = (len(payload) * n * 8) / elapsed if elapsed else float("inf")
+        # Confirm firmware is still alive after the burst.
+        ack = send_line(ser, "km.version()", expect_reply=True, timeout=1.0)
+        alive = (ack == "kmbox: Ferrum")
+        print(f"\n[load:oneway] {n} cmds in {elapsed*1000:.1f}ms")
+        print(f"    {rps:,.0f} cmds/sec   ({bps/1000:,.1f} kbps wire)")
+        print(f"    firmware alive after burst: {'yes' if alive else 'NO'}")
+        return rps
+
+    # rtt mode: round-trip each command, gather per-op latency
+    payload = b"km.version()\r\n"
+    expected = b"kmbox: Ferrum\r\n"
+    lats_ms = []
+    fails = 0
+    t0 = time.perf_counter()
+    for _ in range(n):
+        t_send = time.perf_counter()
+        ser.write(payload)
+        ser.flush()
+        buf = b""
+        deadline = time.perf_counter() + 0.5
+        while time.perf_counter() < deadline:
+            chunk = ser.read(64)
+            if chunk:
+                buf += chunk
+                if buf.endswith(b"\r\n"):
+                    break
+        if buf == expected:
+            lats_ms.append((time.perf_counter() - t_send) * 1000)
+        else:
+            fails += 1
+    elapsed = time.perf_counter() - t0
+    rps = n / elapsed if elapsed else float("inf")
+    print(f"\n[load:rtt] {n} round-trips in {elapsed*1000:.1f}ms")
+    print(f"    {rps:,.0f} rtt/sec   ({fails} failed)")
+    if lats_ms:
+        lats_ms.sort()
+        p = lambda q: lats_ms[min(len(lats_ms) - 1, int(len(lats_ms) * q))]
+        print(f"    latency ms: min={lats_ms[0]:.2f} "
+              f"med={p(0.50):.2f} p95={p(0.95):.2f} max={lats_ms[-1]:.2f}")
+    return rps
+
+
 def cmd_smoke(ser):
     print("--- smoke ---")
     cmd_version(ser)
@@ -100,6 +156,10 @@ def main():
     p.add_argument("state", type=int, choices=[0,1])
     p = sub.add_parser("isdown"); p.add_argument("key", type=int)
     p = sub.add_parser("raw");    p.add_argument("line", help="raw line, e.g. 'km.move(10,10)'")
+    p = sub.add_parser("load",    help="benchmark throughput and report cmds/sec")
+    p.add_argument("-n", type=int, default=1000, help="number of commands (default 1000)")
+    p.add_argument("--mode", choices=["rtt", "oneway"], default="rtt",
+                   help="rtt = round-trip km.version(); oneway = fire-and-forget km.move()")
 
     args = ap.parse_args()
     ser = serial.Serial(args.port, args.baud, timeout=0.1)
@@ -113,6 +173,7 @@ def main():
     elif c == "button":  cmd_button(ser, args.which, args.state)
     elif c == "isdown":  cmd_isdown(ser, args.key)
     elif c == "raw":     send_line(ser, args.line, expect_reply=True)
+    elif c == "load":    cmd_load(ser, args.n, args.mode)
 
 
 if __name__ == "__main__":

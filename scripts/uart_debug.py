@@ -35,6 +35,9 @@ except ImportError:
 VERSION_REPLY = b"kmbox: Ferrum\r\n"
 IOSSIOSPEED = 0x80045402  # macOS arbitrary-baud ioctl, see uart_bench.py
 
+# Must match firmware CMD_BAUD (see Makefile). Update both together.
+CMD_BAUD = 115200
+
 
 def force_baud(s, baud):
     if sys.platform != "darwin":
@@ -43,8 +46,10 @@ def force_baud(s, baud):
 
 
 def autodetect_port():
+    # cu.usbmodem* is the Teensy/CP2102C on the ATP carrier (macOS); prefer it.
     cands = sorted(
-        glob.glob("/dev/cu.usbserial*")
+        glob.glob("/dev/cu.usbmodem*")
+        + glob.glob("/dev/cu.usbserial*")
         + glob.glob("/dev/cu.SLAB_USB*")
         + glob.glob("/dev/ttyUSB*")
         + glob.glob("/dev/ttyACM*")
@@ -103,10 +108,10 @@ def step1_listen_only(s):
 
 
 def step2_baud_sweep(s):
-    print("\n[2] probe km.version()\\r\\n at each plausible baud "
-          "(host side; firmware stays at CMD_BAUD=115200)")
+    print(f"\n[2] probe km.version()\\r\\n at each plausible baud "
+          f"(host side; firmware stays at CMD_BAUD={CMD_BAUD})")
     bauds = (115200, 230400, 460800, 921600,
-             1000000, 2000000, 3000000, 4000000)
+             1000000, 2000000, 3000000, 4000000, 6000000)
     found = []
     for baud in bauds:
         set_baud(s, baud)
@@ -122,9 +127,9 @@ def step2_baud_sweep(s):
 
 
 def step3_line_endings(s):
-    print("\n[3] line-ending variants @ 115200 "
+    print(f"\n[3] line-ending variants @ {CMD_BAUD} "
           "(spec accepts \\r\\n or just \\n; firmware also handles \\r alone)")
-    set_baud(s, 115200)
+    set_baud(s, CMD_BAUD)
     for label, le in (("CR    ", b"\r"),
                       ("LF    ", b"\n"),
                       ("CRLF  ", b"\r\n")):
@@ -138,8 +143,8 @@ def step3_line_endings(s):
 
 
 def step4_repeat(s, n=20):
-    print(f"\n[4] {n}x probes @ 115200 (k=valid, .=garbage, _=empty)")
-    set_baud(s, 115200)
+    print(f"\n[4] {n}x probes @ {CMD_BAUD} (k=valid, .=garbage, _=empty)")
+    set_baud(s, CMD_BAUD)
     legend = []
     first_byte_latencies_ms = []
     hits = misses = empty = 0
@@ -196,11 +201,16 @@ def diagnose(silent_on_all_bauds, found_at_bauds):
         print("  Next step: power-cycle the board, re-run, and confirm enumeration")
         print("  via USB host port still works.")
         return
-    if found_at_bauds and all(b != 115200 for b, _ in found_at_bauds):
+    if found_at_bauds and all(b != CMD_BAUD for b, _ in found_at_bauds):
         b, _ = found_at_bauds[0]
-        print(f"  Firmware responds at {b}, not 115200.")
+        print(f"  Firmware responds at {b}, not {CMD_BAUD}.")
         print(f"  → CMD_BAUD doesn't match the firmware's actual rate, OR a previous")
         print(f"    km.baud({b}) wasn't reset by power-cycle.")
+        return
+    exact_at_default = [b for b, got in found_at_bauds
+                        if b == CMD_BAUD and got == VERSION_REPLY]
+    if exact_at_default:
+        print(f"  Healthy: firmware responds exactly at CMD_BAUD={CMD_BAUD}.")
         return
     print("  Mixed signals — see step-by-step results above.")
 
@@ -216,7 +226,7 @@ def main():
         sys.exit(1)
     print(f"port: {port}")
 
-    s = open_port(port, 115200)
+    s = open_port(port, CMD_BAUD)
     try:
         time.sleep(0.3)  # let CP2102C latency timer settle
         step1_listen_only(s)
@@ -226,9 +236,9 @@ def main():
         diagnose(silent_on_all_bauds=(len(found) == 0),
                  found_at_bauds=found)
     finally:
-        # Return host side to 115200 so the next tool starts clean
+        # Return host side to firmware default so the next tool starts clean
         try:
-            set_baud(s, 115200)
+            set_baud(s, CMD_BAUD)
         except Exception:
             pass
         s.close()
