@@ -17,6 +17,15 @@ Setup required:
 Usage:
     pip install pynput pyserial
     tools/ferrum_aim_test.py /dev/tty.usbserial-0001
+    tools/ferrum_aim_test.py --probe-only ~/.hurra-bridge.tty       # link health check
+    tools/ferrum_aim_test.py --verbose ~/.hurra-bridge.tty          # log every TX/RX
+
+The handshake is a 3-stage probe (km.version → __diag__ → km.move(0,0))
+that pinpoints where a link is broken before the GUI starts. __diag__ is a
+bridge-only side-channel that real apps never use — it asks the bridge
+"is the firmware actually answering?" without the bridge having to lie on
+its public Ferrum surface. With --verbose every line is logged with
+millisecond timestamps to stderr.
 
 Keys:
     Space   start the run (cycles through all dots in order)
@@ -65,10 +74,219 @@ class Dot:
         self.iterations    = 0
 
 
+# ── Verbose logging ────────────────────────────────────────────────────────
+#
+# VERBOSE is set from the CLI. When on, every TX line, every RX byte
+# accumulated into a full reply, and every handshake stage prints with a
+# millisecond timestamp. Default is off — chatty logs would drown out the
+# closed-loop status during normal aim runs.
+
+VERBOSE = False
+_T0 = time.monotonic()
+
+def vlog(fmt, *args):
+    if not VERBOSE:
+        return
+    ts_ms = (time.monotonic() - _T0) * 1000.0
+    msg = fmt % args if args else fmt
+    print(f"[{ts_ms:9.2f} ms] {msg}", file=sys.stderr, flush=True)
+
+
+def _ascii_safe(b: bytes) -> str:
+    """Render bytes for logs: printable as-is, escape control chars."""
+    out = []
+    for ch in b:
+        if ch == 0x0D: out.append("\\r")
+        elif ch == 0x0A: out.append("\\n")
+        elif ch == 0x09: out.append("\\t")
+        elif 0x20 <= ch <= 0x7E: out.append(chr(ch))
+        else: out.append(f"\\x{ch:02x}")
+    return "".join(out)
+
+
+def send_line(ser, line: str):
+    """Write a Ferrum command line. Logs in verbose mode. No reply read."""
+    payload = (line + "\r\n").encode("ascii")
+    vlog("TX %s", _ascii_safe(payload))
+    ser.write(payload)
+
+
+def read_line(ser, timeout_s: float):
+    """Read one CR/LF-terminated line. Returns the decoded string (without
+    terminator) or None on timeout. Logs raw bytes + parsed line in verbose."""
+    deadline = time.monotonic() + timeout_s
+    buf = bytearray()
+    while time.monotonic() < deadline:
+        chunk = ser.read(64)
+        if not chunk:
+            continue
+        buf.extend(chunk)
+        # Accept either \r\n or bare \n as a line terminator.
+        nl = buf.find(b"\n")
+        if nl >= 0:
+            line_bytes = bytes(buf[: nl + 1])
+            vlog("RX %s", _ascii_safe(line_bytes))
+            return line_bytes.rstrip(b"\r\n").decode("ascii", "replace")
+    if buf:
+        vlog("RX partial (no terminator before %dms timeout): %s",
+             int(timeout_s * 1000), _ascii_safe(bytes(buf)))
+    else:
+        vlog("RX (silent, %dms timeout)", int(timeout_s * 1000))
+    return None
+
+
+def cmd_rtt(ser, line: str, timeout_s: float = 0.5):
+    """Send a command and time the round-trip. Returns (reply_or_None, ms)."""
+    ser.reset_input_buffer()
+    t0 = time.perf_counter()
+    send_line(ser, line)
+    ser.flush()
+    reply = read_line(ser, timeout_s)
+    return reply, (time.perf_counter() - t0) * 1000.0
+
+
+# ── Handshake ──────────────────────────────────────────────────────────────
+#
+# The bridge's old cb_version unconditionally emitted "kmbox: Ferrum" — that
+# made handshake pass even when the firmware was unreachable. With the fixed
+# bridge, version() now actually round-trips to firmware and emits a distinct
+# error string on failure.
+#
+# We do a 4-stage probe so we can pinpoint *where* a failure lies if any:
+#   1. Port exists and opens.
+#   2. km.version()              — bridge↔firmware reachable.
+#   3. km.lock_ml() round-trip   — request/reply path (not just announce).
+#   4. km.move(0,0) one-way      — write path doesn't error.
+
+HANDSHAKE_VER_TIMEOUT_S = 1.0
+
+
+def read_block(ser, timeout_s: float, end_marker: bytes = b"}\r\n"):
+    """Read a multi-line response, stopping at end_marker or timeout.
+    Used for the bridge's __diag__ reply which spans multiple lines."""
+    deadline = time.monotonic() + timeout_s
+    buf = bytearray()
+    while time.monotonic() < deadline:
+        chunk = ser.read(64)
+        if chunk:
+            buf.extend(chunk)
+            if buf.endswith(end_marker):
+                break
+    text = bytes(buf).decode("ascii", "replace")
+    if VERBOSE and text:
+        for ln in text.splitlines():
+            vlog("RX %s", ln)
+    return text
+
+
+def run_handshake(ser):
+    """End-to-end handshake using both the public Ferrum interface and the
+    bridge's __diag__ side-channel. Prints progress; sys.exit(1) on hard
+    failure with a diagnosis pointing at the broken layer.
+
+    Architecture note: every app that talks to this device sends Ferrum ASCII
+    and expects Ferrum ASCII back — including this tool. The bridge is the
+    permanent translator, not a shim. So the public-facing probe is
+    km.version(); for *infrastructure* questions (is the firmware actually
+    answering on the real UART, what's the bridge seeing?) we ask the bridge
+    directly via __diag__, which real apps will never use."""
+    print("── handshake ──", file=sys.stderr)
+    print(f"  port:   {ser.port}", file=sys.stderr)
+    print(f"  baud:   {ser.baudrate}", file=sys.stderr)
+    if VERBOSE:
+        print("  verbose: ON  (logging every TX/RX)", file=sys.stderr)
+
+    ser.reset_input_buffer()
+    ser.reset_output_buffer()
+    vlog("buffers reset")
+
+    # Stage 1: km.version() — canonical Ferrum reply. Always says
+    # "kmbox: Ferrum" because that's what apps expect; truth lives elsewhere.
+    print("  [1/3] km.version() ... ", end="", file=sys.stderr, flush=True)
+    ver, ver_ms = cmd_rtt(ser, "km.version()", HANDSHAKE_VER_TIMEOUT_S)
+    if ver is None:
+        print("TIMEOUT", file=sys.stderr)
+        sys.exit(
+            "handshake stage 1 FAILED: no reply to km.version().\n"
+            "  → bridge is not running, or PTY symlink points at a dead device.\n"
+            "  → check `ps aux | grep hurra-bridge` and `ls -la ~/.hurra-bridge.tty`."
+        )
+    print(f"{ver_ms:5.1f} ms  reply={ver!r}", file=sys.stderr)
+    if "ferrum" not in ver.lower():
+        print(f"  WARN: unexpected version string: {ver!r}", file=sys.stderr)
+
+    # Stage 2: __diag__ — bridge-side health report (not a Ferrum command).
+    # This tells us whether the bridge is actually reaching the firmware,
+    # without the bridge having to lie on its public Ferrum surface.
+    print("  [2/3] __diag__    ... ", end="", file=sys.stderr, flush=True)
+    ser.reset_input_buffer()
+    t0 = time.perf_counter()
+    send_line(ser, "__diag__")
+    ser.flush()
+    diag = read_block(ser, 0.5)
+    diag_ms = (time.perf_counter() - t0) * 1000.0
+    if not diag or "bridge_diag" not in diag:
+        print("MISSING", file=sys.stderr)
+        sys.exit(
+            "handshake stage 2 FAILED: bridge did not reply to __diag__.\n"
+            "  → the bridge is too old (no __diag__ support) or not running.\n"
+            "  → rebuild: cd hurra-app && cmake --build build"
+        )
+    print(f"{diag_ms:5.1f} ms", file=sys.stderr)
+    # Pretty-print the diag block — single short indent so it's obvious it's
+    # a sub-report and not part of the handshake stage list.
+    for ln in diag.splitlines():
+        ln = ln.rstrip()
+        if ln:
+            print(f"        {ln}", file=sys.stderr)
+    # Parse fw_link to decide pass/fail.
+    fw_state = None
+    for ln in diag.splitlines():
+        ln = ln.strip()
+        if ln.startswith("fw_link="):
+            fw_state = ln.split("=", 1)[1].rstrip()
+    if fw_state == "DEAD":
+        sys.exit(
+            "handshake FAILED: bridge can reach the USB-UART chip but the\n"
+            "firmware is not answering. Check:\n"
+            "  • LINK LED (Teensy D31) toggles when you write to this port\n"
+            "  • TX/RX wiring between USB-UART chip and Teensy pins 16/17\n"
+            "  • shared GND between USB-UART chip and Teensy\n"
+            "  • bridge log for `version probe FAILED` lines\n"
+            "  • that the right firmware is flashed (Hurra, not Ferrum)\n"
+        )
+    if fw_state == "flapping":
+        print("  WARN: firmware link is flapping — intermittent connection",
+              file=sys.stderr)
+    if fw_state == "unknown":
+        print("  NOTE: no probe data yet; will resolve after a few km.version() calls",
+              file=sys.stderr)
+
+    # Stage 3: km.move(0,0) — write-only smoke. Confirms the write path
+    # doesn't error and the bridge stays quiet (no protocol-error reply).
+    print("  [3/3] km.move(0,0) ... ", end="", file=sys.stderr, flush=True)
+    ser.reset_input_buffer()
+    send_line(ser, "km.move(0, 0)")
+    ser.flush()
+    quiet = read_line(ser, 0.05)
+    if quiet is None:
+        print("ok (silent, as expected)", file=sys.stderr)
+    else:
+        print(f"unexpected reply: {quiet!r}", file=sys.stderr)
+
+    print("── handshake complete ──\n", file=sys.stderr)
+
+
 def send_move(ser, dx, dy):
     # No try/except: write_timeout backpressure throttles the caller; we don't
     # want to silently drop moves and lose the closed-loop signal.
-    ser.write(f"km.move({dx}, {dy})\r\n".encode("ascii"))
+    payload = f"km.move({dx}, {dy})\r\n".encode("ascii")
+    if VERBOSE:
+        # Sample, don't flood: only every 64th move in verbose mode.
+        send_move._n = getattr(send_move, "_n", 0) + 1
+        if send_move._n <= 5 or (send_move._n & 0x3F) == 0:
+            vlog("TX(move #%d) %s", send_move._n, _ascii_safe(payload))
+    ser.write(payload)
 
 
 def split_move(sx, sy, max_step):
@@ -289,21 +507,7 @@ class AimTest:
     # ----- runloop -----
 
     def run(self):
-        # Verify the device speaks Ferrum before starting the GUI runloop.
-        self.ser.reset_input_buffer()
-        self.ser.write(b"km.version()\r\n")
-        self.ser.flush()
-        deadline = time.monotonic() + 0.5
-        buf = b""
-        while time.monotonic() < deadline:
-            b = self.ser.read(1)
-            if not b: continue
-            buf += b
-            if buf.endswith(b"\r\n"): break
-        ver = buf.decode("ascii", "replace").rstrip("\r\n")
-        if ver != "kmbox: Ferrum":
-            sys.exit(f"device handshake failed: got {ver!r}, expected 'kmbox: Ferrum'")
-        print(f"Connected: {ver}")
+        run_handshake(self.ser)
         self.root.mainloop()
 
 
@@ -396,6 +600,10 @@ def main():
     ap.add_argument("--cmd-step-px", type=int, default=CMD_STEP_PX_DEFAULT,
                     help=f"max |dx|,|dy| per km.move() (default {CMD_STEP_PX_DEFAULT}); "
                          "larger tick steps split into multiple sub-commands")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="log every TX/RX line with millisecond timestamps")
+    ap.add_argument("--probe-only", action="store_true",
+                    help="run the handshake and exit (no GUI, no aim run)")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("aim", help="GUI closed-loop aim test (default)")
     p = sub.add_parser("load", help="benchmark km.move() throughput and report cmds/sec")
@@ -404,8 +612,18 @@ def main():
                    help="oneway = fire-and-forget km.move() (default); rtt = round-trip km.version()")
     args = ap.parse_args()
 
+    global VERBOSE
+    VERBOSE = bool(args.verbose)
+
     ser = serial.Serial(args.port, args.baud, timeout=0.1, write_timeout=5.0)
+    if args.probe_only:
+        run_handshake(ser)
+        ser.close()
+        return
     if args.cmd == "load":
+        # Load mode still benefits from the handshake — confirms the link is
+        # alive before we measure throughput against a black hole.
+        run_handshake(ser)
         cmd_load(ser, args.n, args.mode)
         ser.close()
         return
