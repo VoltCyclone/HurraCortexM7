@@ -6,8 +6,15 @@
 
 void kmbox_init(void);
 
+// Configure the STAT LED pad (Teensy pin 13 = GPIO_B0_03 / GPIO7[3]) for
+// runtime diagnostic blinking. MUST be called after USB device enumeration
+// — pin 13 is also the MKL02 bootloader's JTAG/SWD channel during reset,
+// and driving it before the bootloader hands off has wedged the chip in
+// the past. Until this is called, every stat_blip_*() call is a no-op.
+void kmbox_stat_led_enable(void);
+
 // Split poll: fast runs unconditionally each iteration (timers, tx, LED
-// timeout); heavy only when kmbox_rx_pending() reports UART bytes pending.
+// pulse scheduler); heavy only when kmbox_rx_pending() reports UART bytes pending.
 void kmbox_poll_fast(void);
 void kmbox_poll_heavy(void);
 bool kmbox_rx_pending(void);

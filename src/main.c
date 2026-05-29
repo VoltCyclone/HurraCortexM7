@@ -231,6 +231,9 @@ int main(void)
 	}
 	led_off();
 	led_pwm_init();
+	// USB device is configured — the MKL02 bootloader is done driving pin 13
+	// as its JTAG/SWD channel, so it's safe to wake the STAT diag LED now.
+	kmbox_stat_led_enable();
 	uint32_t report_count = 0;
 	uint32_t drop_count = 0;
 	uint32_t loop_count = 0;

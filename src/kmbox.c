@@ -53,12 +53,73 @@ extern uint32_t millis(void);
 #define KM_TX_DMAMUX_SRC   DMAMUX_SOURCE_LPUART3_TX
 #define KM_TX_CH           4
 
-// D31 = LINK:  GPIO_EMC_37 = GPIO3[23] — toggles when UART data arriving
-// D30 = STATE: GPIO_EMC_36 = GPIO3[22] — toggles on valid frame dispatch
-// D24 = STATUS: GPIO_AD_B0_12 = GPIO1[12] — solid = UART OK, flickers on error
-#define LINK_LED_BIT   (1u << 23)
-#define STATE_LED_BIT  (1u << 22)
-#define STATUS_LED_BIT (1u << 12)
+// STAT LED on MicroMod Teensy — Teensy pin 13 = GPIO_B0_03, on the fast GPIO
+// bank (GPIO7 bit 3) after startup's GPR26..29 = 0xFFFFFFFF remap. This is
+// the *only* user-controllable LED on a MicroMod Teensy + ATP combo; the
+// ATP carrier's VIN / 3V3 LEDs are power-rail indicators, not on a GPIO,
+// and Teensy core pins 24 / 30 / 31 aren't broken out on the MicroMod edge.
+//
+// Pin 13 is also the MKL02 bootloader's JTAG/SWD channel during reset, so
+// we deliberately leave it untouched until USB device is configured (see
+// kmbox_stat_led_enable() — main.c calls this once enumeration is done).
+//
+// Diagnostic encoding (event-driven, non-blocking from the hot path):
+//   short pulse (~25 ms)  → RX burst arrived
+//   long  pulse (~120 ms) → UART framing / overrun / parser reset
+// Pulses are queued; the scheduler picks them up at the next poll_fast.
+#define STAT_LED_BIT       (1u << 3)
+#define STAT_PULSE_SHORT_MS  25u
+#define STAT_PULSE_LONG_MS  120u
+#define STAT_GAP_MS          25u
+
+static volatile bool stat_led_armed = false;  // set by enable(), gates all writes
+static uint32_t stat_pulse_until_ms = 0;      // 0 = idle / led off
+static uint32_t stat_gap_until_ms   = 0;
+static uint8_t  stat_q_short = 0;             // pending short pulses
+static uint8_t  stat_q_long  = 0;             // pending long pulses
+
+static inline void stat_led_on(void)  { if (stat_led_armed) GPIO7_DR_SET   = STAT_LED_BIT; }
+static inline void stat_led_off(void) { if (stat_led_armed) GPIO7_DR_CLEAR = STAT_LED_BIT; }
+
+static void stat_blip_short(void) { if (stat_q_short < 8) stat_q_short++; }
+static void stat_blip_long (void) { if (stat_q_long  < 4) stat_q_long++;  }
+
+// Non-blocking pulse scheduler. Cheap when idle: two compares.
+static void stat_led_tick(uint32_t now)
+{
+	if (!stat_led_armed) return;
+	if (stat_pulse_until_ms) {
+		if ((int32_t)(now - stat_pulse_until_ms) >= 0) {
+			stat_led_off();
+			stat_pulse_until_ms = 0;
+			stat_gap_until_ms = now + STAT_GAP_MS;
+		}
+		return;
+	}
+	if (stat_gap_until_ms && (int32_t)(now - stat_gap_until_ms) < 0) return;
+	stat_gap_until_ms = 0;
+	// Long pulses have priority — error signals matter more than activity.
+	if (stat_q_long) {
+		stat_q_long--;
+		stat_led_on();
+		stat_pulse_until_ms = now + STAT_PULSE_LONG_MS;
+	} else if (stat_q_short) {
+		stat_q_short--;
+		stat_led_on();
+		stat_pulse_until_ms = now + STAT_PULSE_SHORT_MS;
+	}
+}
+
+// Wire up the pad. Call exactly once, after USB device enumeration completes
+// so the bootloader is no longer touching pin 13's JTAG/SWD channel.
+void kmbox_stat_led_enable(void)
+{
+	IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_03 = 5; // ALT5 = GPIO2/GPIO7 bit 3
+	IOMUXC_SW_PAD_CTL_PAD_GPIO_B0_03 = IOMUXC_PAD_DSE(6);
+	GPIO7_GDIR  |= STAT_LED_BIT;
+	GPIO7_DR_CLEAR = STAT_LED_BIT;
+	stat_led_armed = true;
+}
 
 static uint32_t link_last_rx_time;
 // Separate from link_last_rx_time (which is cleared by the LED-timeout path
@@ -281,19 +342,10 @@ void kmbox_init(void)
 		IOMUXC_PAD_PKE | IOMUXC_PAD_PUE | IOMUXC_PAD_PUS(3);
 	IOMUXC_LPUART3_RX_SELECT_INPUT = 0; // DAISY=0 → GPIO_AD_B1_07_ALT2
 
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_37 = 5; // D31 LINK — ALT5 = GPIO3[23]
-	IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_37 = IOMUXC_PAD_DSE(6);
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_EMC_36 = 5; // D30 STATE — ALT5 = GPIO3[22]
-	IOMUXC_SW_PAD_CTL_PAD_GPIO_EMC_36 = IOMUXC_PAD_DSE(6);
-	GPIO3_GDIR |= LINK_LED_BIT | STATE_LED_BIT;
-	GPIO3_DR_CLEAR = LINK_LED_BIT | STATE_LED_BIT;
-
-	// D24 STATUS LED — solid when UART OK, flickers on error
-	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B0_12 = 5; // D24 — ALT5 = GPIO1[12]
-	IOMUXC_SW_PAD_CTL_PAD_GPIO_AD_B0_12 = IOMUXC_PAD_DSE(6);
-	GPIO1_GDIR |= STATUS_LED_BIT;
-	GPIO1_DR_SET = STATUS_LED_BIT; // ON = UART configured OK
-
+	// STAT LED pad is configured later by main.c → kmbox_stat_led_enable()
+	// (after USB device is configured) so we don't tug on pin 13's JTAG/SWD
+	// channel during the bootloader window. Until then all stat_* writes
+	// are no-ops via stat_led_armed.
 	uint32_t baud_reg = compute_baud_reg(UART_BAUD);
 	if (baud_reg == 0) {
 		// Build-time default rate is known-good; this should be unreachable.
@@ -668,17 +720,12 @@ void kmbox_poll_fast(void)
 		}
 	}
 
-	// LINK-LED timeout lives in _fast (not _heavy) — _heavy stops being
-	// called once the ring drains, so the LED would stick on otherwise.
-	if (__builtin_expect(link_last_rx_time != 0, 0) &&
-	    (millis() - link_last_rx_time) > 50) {
-		GPIO3_DR_CLEAR = LINK_LED_BIT;
-		link_last_rx_time = 0;
-	}
+	// Drive the STAT LED pulse scheduler. Cheap when idle (two compares).
+	stat_led_tick(millis());
 }
 
 // Called only when kmbox_rx_pending() reported bytes available. Reads
-// UART STAT, drains the DMA ring, feeds the ferrum parser, updates LINK LED.
+// UART STAT, drains the DMA ring, feeds the parser, signals STAT LED.
 void kmbox_poll_heavy(void)
 {
 	uint32_t stat = KM_UART_STAT;
@@ -690,12 +737,12 @@ void kmbox_poll_heavy(void)
 		if (stat & (LPUART_STAT_OR | LPUART_STAT_FE)) {
 			proto_reset();
 		}
-		GPIO1_DR_TOGGLE = STATUS_LED_BIT;
+		stat_blip_long();  // UART-level error → long pulse
 	}
 
 	uint16_t head = ((uint32_t)KM_RX_DADDR - (uint32_t)dma_rx_ring) & (DMA_RX_RING_SIZE - 1);
 	if (head != rx_tail) {
-		GPIO3_DR_TOGGLE = LINK_LED_BIT;
+		stat_blip_short();  // RX burst → short pulse
 		link_last_rx_time = millis();
 		last_rx_activity_time = link_last_rx_time;
 	}
@@ -709,7 +756,7 @@ void kmbox_poll_heavy(void)
 			rx_drv_overrun_count++;
 			rx_tail = head;
 			proto_reset();
-			GPIO1_DR_TOGGLE = STATUS_LED_BIT;
+			stat_blip_long();  // driver overrun → long pulse
 		}
 	}
 	while (rx_tail != head) {
@@ -721,7 +768,6 @@ void kmbox_poll_heavy(void)
 			tx_flush();
 			frames_ok++;
 			detected_proto = 1;
-			GPIO3_DR_TOGGLE = STATE_LED_BIT;
 		}
 	}
 }
