@@ -10,7 +10,7 @@
 
 **Testing note:** Bare-metal firmware, no unit harness. "The test" per task is: a standalone cross-compile of `led.c`, then the full `make` / `make PROTOCOL=ferrum` link, plus grep gates. The absolute blink *rate* can only be confirmed on hardware (Task 4) — but the design makes the idle/active/error *ratios* exact regardless of the true IP-bus clock, so only one calibration constant (`LED_HB_K`) might need a hardware tweak.
 
-**Reference:** QuadTimer cascade facts (PCS `0b0001` = clocked by counter-1 output; `OUTMODE(6)` = toggle/50%; `CSCTRL CL1/CL2` = glitch-free `CMPLD`→`COMP` latch; `CCM_CCGR6_QTIMER2` gate) are from the i.MX RT1060 RM ch.16 + Teensy `pwm.c` idioms. Pin 13 = `GPIO_B0_03`, ALT1 = `QTIMER2_TIMER0` = TMR2 CH0; `core/startup.c:382-385` already routes the pad to fast GPIO7[3].
+**Reference:** QuadTimer cascade facts (PCS `5` (0b0101) = clocked by counter-1 output (PCS 0-3 = counter inputs, 4-7 = outputs); `OUTMODE(6)` = toggle/50%; `CSCTRL CL1/CL2` = glitch-free `CMPLD`→`COMP` latch; `CCM_CCGR6_QTIMER2` gate) are from the i.MX RT1060 RM ch.16 + Teensy `pwm.c` idioms. Pin 13 = `GPIO_B0_03`, ALT1 = `QTIMER2_TIMER0` = TMR2 CH0; `core/startup.c:382-385` already routes the pad to fast GPIO7[3].
 
 All commands assume CWD `/Users/ramseymcgrath/code/Hurra-v2` on branch `feat/pin13-heartbeat-led` (already created). Toolchain prefix (from `Makefile`): `~/.platformio/packages/toolchain-gccarmnoneeabi-teensy/bin/arm-none-eabi-gcc`.
 
@@ -163,7 +163,7 @@ void led_heartbeat_start(void)
 	IMXRT_TMR2.CH[1].CTRL   = TMR_CTRL_CM(1) | TMR_CTRL_PCS(0xF) |
 	                          TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(6);
 
-	// CH0: pin-13 output. Clocked by CH1 OFLAG (PCS=0b0001 = counter-1 output),
+	// CH0: pin-13 output. Clocked by CH1 OFLAG (PCS=5 (0b0101) = counter-1 output),
 	// toggle OFLAG every (COMP0+1) -> 50% square; OEN drives the pad.
 	uint16_t comp0 = centihz_to_comp(50);   // start at idle ~0.5 Hz
 	IMXRT_TMR2.CH[0].CTRL   = 0;
@@ -175,7 +175,7 @@ void led_heartbeat_start(void)
 	IMXRT_TMR2.CH[0].CMPLD2 = comp0;
 	IMXRT_TMR2.CH[0].CSCTRL = TMR_CSCTRL_CL1(1) | TMR_CSCTRL_CL2(1);
 	IMXRT_TMR2.CH[0].SCTRL  = TMR_SCTRL_OEN;
-	IMXRT_TMR2.CH[0].CTRL   = TMR_CTRL_CM(1) | TMR_CTRL_PCS(1) |
+	IMXRT_TMR2.CH[0].CTRL   = TMR_CTRL_CM(1) | TMR_CTRL_PCS(5) |
 	                          TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(6);
 
 	IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_03 = LED_PAD_ALT_QTMR; // hand pad to QuadTimer

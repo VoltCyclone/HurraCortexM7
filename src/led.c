@@ -107,8 +107,9 @@ void led_heartbeat_start(void)
 	IMXRT_TMR2.CH[1].CTRL   = TMR_CTRL_CM(1) | TMR_CTRL_PCS(0xF) |
 	                          TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(6);
 
-	// CH0: pin-13 output. Clocked by CH1 OFLAG (PCS=0b0001 = counter-1 output),
-	// toggle OFLAG every (COMP0+1) -> 50% square; OEN drives the pad.
+	// CH0: pin-13 output. Clocked by CH1 OFLAG (PCS=0b0101=5 = counter-1 output;
+	// QuadTimer PCS: 0-3=counter inputs, 4-7=counter outputs, 8-15=IPbus/1..128).
+	// Toggle OFLAG every (COMP0+1) -> 50% square; OEN drives the pad.
 	uint16_t comp0 = centihz_to_comp(50);   // start at idle ~0.5 Hz
 	IMXRT_TMR2.CH[0].CTRL   = 0;
 	IMXRT_TMR2.CH[0].CNTR   = 0;
@@ -119,7 +120,7 @@ void led_heartbeat_start(void)
 	IMXRT_TMR2.CH[0].CMPLD2 = comp0;
 	IMXRT_TMR2.CH[0].CSCTRL = TMR_CSCTRL_CL1(1) | TMR_CSCTRL_CL2(1);
 	IMXRT_TMR2.CH[0].SCTRL  = TMR_SCTRL_OEN;
-	IMXRT_TMR2.CH[0].CTRL   = TMR_CTRL_CM(1) | TMR_CTRL_PCS(1) |
+	IMXRT_TMR2.CH[0].CTRL   = TMR_CTRL_CM(1) | TMR_CTRL_PCS(5) |
 	                          TMR_CTRL_LENGTH | TMR_CTRL_OUTMODE(6);
 
 	IOMUXC_SW_MUX_CTL_PAD_GPIO_B0_03 = LED_PAD_ALT_QTMR; // hand pad to QuadTimer
