@@ -10,29 +10,10 @@
 #include "smooth.h"
 #include "humanize.h"
 #include "gpt_profile.h"
+#include "led.h"
 
 extern uint32_t millis(void);
 extern void delay(uint32_t msec);
-
-// LED helpers — no-ops on the kmbox.  Pin 13 (GPIO_B0_03 / GPIO7 bit 3) is
-// the on-board orange LED and is also the channel the MKL02 bootloader
-// uses to talk to the ARM core over JTAG/SWD during reset.  Driving it as
-// GPIO or FlexPWM2 from user code is what wedged the chip into the
-// "9-blink ARM JTAG DAP Init Error" state on first boot.  The kmbox just
-// doesn't touch the LED.
-static void led_pwm_init(void) { }
-static void led_pwm_set(uint8_t brightness) { (void)brightness; }
-static void led_on(void)  { }
-static void led_off(void) { }
-static void led_toggle(void) __attribute__((unused));
-static void led_toggle(void) { }
-static void led_blink_forever(uint8_t code, uint32_t on_ms, uint32_t off_ms)
-{
-	(void)code; (void)on_ms; (void)off_ms;
-	while (1) delay(1000);
-}
-static void led_stage(uint8_t n) __attribute__((unused));
-static void led_stage(uint8_t n) { (void)n; }
 
 typedef struct {
 	uint8_t  host_slot;
@@ -95,6 +76,7 @@ int main(void)
 	SCB_SCR |= SCB_SCR_SEVONPEND;
 
 	kmbox_init();
+	led_init();
 
 	// PIT0: smooth injection timer — clock/ISR now, rate set after enumeration
 	CCM_CCGR1 |= CCM_CCGR1_PIT(CCM_CCGR_ON);
@@ -230,13 +212,14 @@ int main(void)
 		}
 	}
 	led_off();
-	led_pwm_init();
+	led_heartbeat_start();
 	uint32_t report_count = 0;
 	uint32_t drop_count = 0;
 	uint32_t loop_count = 0;
-	uint32_t led_off_time = 0; // non-blocking LED pulse
-	uint32_t led_pwm_update = millis();
-	uint32_t led_report_snapshot = 0;
+	uint32_t led_status_tick = millis();
+	uint32_t led_rx_snapshot = 0;
+	uint32_t led_err_snapshot = 0;
+	uint16_t led_centihz = 0;
 
 	while (1) {
 		uint32_t now = millis();
@@ -281,8 +264,6 @@ int main(void)
 				} else {
 					drop_count++;
 				}
-				led_on();
-				led_off_time = now + 2;
 			}
 		}
 		for (uint8_t m = 0; m < num_out_mappings; m++) {
@@ -295,21 +276,28 @@ int main(void)
 				(void)usb_host_interrupt_out_send(out_map[m].host_slot, out_data, (uint16_t)n);
 			}
 		}
-		if (led_off_time && now >= led_off_time) {
-			led_off();
-			led_off_time = 0;
-		}
 		kmbox_send_pending();
 		if (!did_work)
 			__asm volatile("wfe");
 
-		if ((now - led_pwm_update) >= 100) {
-			uint32_t delta = report_count - led_report_snapshot;
-			led_report_snapshot = report_count;
-			uint32_t brightness = delta * 10 * 255 / 1000;
-			if (brightness > 255) brightness = 255;
-			led_pwm_set((uint8_t)brightness);
-			led_pwm_update = now;
+		// Heartbeat rate reflects UART status. Sampled every 100 ms; the
+		// QuadTimer keeps blinking on its own — we only rewrite its compare
+		// (glitch-free) when the state actually changes.
+		if ((now - led_status_tick) >= 100) {
+			led_status_tick = now;
+			uint32_t rx  = kmbox_rx_byte_count();
+			uint32_t err = kmbox_uart_overrun() + kmbox_uart_framing() +
+			               kmbox_uart_noise();
+			uint16_t centihz;
+			if (err != led_err_snapshot)      centihz = 600; // ERROR  ~6 Hz
+			else if (rx != led_rx_snapshot)   centihz = 200; // ACTIVE ~2 Hz
+			else                              centihz = 50;  // IDLE   ~0.5 Hz
+			led_err_snapshot = err;
+			led_rx_snapshot  = rx;
+			if (centihz != led_centihz) {
+				led_centihz = centihz;
+				led_heartbeat_set_rate(centihz);
+			}
 		}
 		if ((++loop_count & 0x3FF) == 0) {
 			if (!usb_host_device_connected()) {
