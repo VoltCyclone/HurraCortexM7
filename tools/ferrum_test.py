@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Ferrum text protocol test harness.
 
-Run against the CP2102C USB-UART bridge wired to Teensy D0/D1.
+Run against the WCH CH343 USB-UART bridge wired to Teensy D16/D17 (LPUART3),
+or against the hurra-bridge PTY symlink (~/.hurra-bridge.tty).
 
 Examples:
     tools/ferrum_test.py /dev/cu.usbserial-XYZ version
@@ -19,7 +20,10 @@ except ImportError:
 
 def send_line(ser, line, *, expect_reply=False, timeout=0.5):
     payload = (line + "\r\n").encode("ascii")
-    ser.write(payload); ser.flush()
+    # No ser.flush(): flush() calls tcdrain(), which blocks indefinitely on a
+    # pseudo-terminal (the hurra-bridge PTY) when the reader hasn't drained yet.
+    # write() already queues the bytes; the reply read below provides the sync.
+    ser.write(payload)
     print(f"TX  {line}")
     if not expect_reply:
         return None
