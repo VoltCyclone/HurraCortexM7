@@ -54,21 +54,16 @@ enum {
     TYPE_LOCK_MX  = 0x65,
     TYPE_LOCK_MY  = 0x66,
     TYPE_CATCH_XY = 0x67,
-    // 0x70–0x7F streams + callbacks
-    TYPE_STREAM_AXIS  = 0x70,
-    TYPE_STREAM_BTN   = 0x71,
-    TYPE_STREAM_MOUSE = 0x72,
-    TYPE_STREAM_KB    = 0x73,
+    // 0x70–0x73 reserved/unused (removed Hurra-only STREAM_AXIS/BTN/MOUSE/KB)
     TYPE_CB_BUTTONS   = 0x74,
     TYPE_CB_AXES      = 0x75,
     TYPE_CB_KEYS      = 0x76,
-    // 0x80–0x8F unsolicited telemetry
+    // 0x80–0x8F on-change telemetry callbacks (Ferrum-standard)
     TYPE_TLM_AXIS    = 0x80,
     TYPE_TLM_BUTTONS = 0x81,
-    TYPE_TLM_MOUSE   = 0x82,
+    // 0x82 reserved/unused (removed Hurra-only TLM_MOUSE)
     TYPE_TLM_KB      = 0x83,
-    TYPE_TLM_STATS   = 0x84,
-    TYPE_TLM_LOG     = 0x85,
+    // 0x84–0x85 reserved/unused (removed Hurra-only TLM_STATS/TLM_LOG)
 };
 
 #define HURRA_IDENTITY "kmbox: Hurra v1"
@@ -100,16 +95,8 @@ static uint32_t s_reboot_at;
 static uint32_t s_baud_pending;
 static uint32_t s_baud_apply_at;
 
-// ── stream/callback state ───────────────────────────────────────────────────
-typedef struct { uint8_t mode; uint8_t period_ms; uint32_t last_ms; } stream_t;
-static stream_t s_str_axis, s_str_btn, s_str_mouse, s_str_kb;
+// ── callback state (Ferrum-standard on-change callbacks) ────────────────────
 static uint8_t  s_cb_buttons, s_cb_axes, s_cb_keys;
-
-// ── snapshots populated by hurra_notify_* ───────────────────────────────────
-static uint8_t  s_snap_buttons;
-static int16_t  s_snap_dx, s_snap_dy;
-static int8_t   s_snap_wheel;
-static uint8_t  s_snap_keys[6];
 static uint8_t  s_last_btn_emitted = 0;
 static uint8_t  s_last_keys_emitted[6];
 
@@ -553,23 +540,7 @@ static TF_Result l_screen(TinyFrame *tf, TF_Msg *msg)
     return TF_STAY;
 }
 
-// ── stream/callback configuration listeners ──────────────────────────────────
-
-static TF_Result stream_cfg_listener(TinyFrame *tf, TF_Msg *msg, stream_t *s)
-{
-    (void)tf;
-    track_id(msg->frame_id);
-    if (msg->len == 0) {
-        uint8_t p[2] = { s->mode, s->period_ms };
-        send_reply(msg, p, 2);
-        return TF_STAY;
-    }
-    if (msg->len != 2) { s_payload_invalid++; return TF_STAY; }
-    s->mode = msg->data[0];
-    s->period_ms = msg->data[1];
-    s->last_ms = millis();
-    return TF_STAY;
-}
+// ── callback configuration listeners (Ferrum-standard) ───────────────────────
 
 static TF_Result cb_toggle_listener(TinyFrame *tf, TF_Msg *msg, uint8_t *flag)
 {
@@ -586,10 +557,6 @@ static TF_Result cb_toggle_listener(TinyFrame *tf, TF_Msg *msg, uint8_t *flag)
     return TF_STAY;
 }
 
-static TF_Result l_stream_axis(TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_axis);  }
-static TF_Result l_stream_btn (TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_btn);   }
-static TF_Result l_stream_ms  (TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_mouse); }
-static TF_Result l_stream_kb  (TinyFrame *tf, TF_Msg *m) { return stream_cfg_listener(tf, m, &s_str_kb);    }
 static TF_Result l_cb_btn     (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_buttons); }
 static TF_Result l_cb_axes    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_axes);    }
 static TF_Result l_cb_keys    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_keys);    }
@@ -611,49 +578,6 @@ static void tlm_send(uint8_t type, const uint8_t *p, uint16_t n)
     TF_Send(&s_tf, &m);
 }
 
-static void stream_emit_axis(uint32_t now)
-{
-    if (s_str_axis.mode == 0 || (now - s_str_axis.last_ms) < s_str_axis.period_ms) return;
-    s_str_axis.last_ms = now;
-    uint8_t p[5] = {
-        (uint8_t)s_snap_dx, (uint8_t)(s_snap_dx >> 8),
-        (uint8_t)s_snap_dy, (uint8_t)(s_snap_dy >> 8),
-        (uint8_t)s_snap_wheel,
-    };
-    tlm_send(TYPE_TLM_AXIS, p, sizeof(p));
-}
-
-static void stream_emit_btn(uint32_t now)
-{
-    if (s_str_btn.mode == 0 || (now - s_str_btn.last_ms) < s_str_btn.period_ms) return;
-    s_str_btn.last_ms = now;
-    tlm_send(TYPE_TLM_BUTTONS, &s_snap_buttons, 1);
-}
-
-static void stream_emit_mouse(uint32_t now)
-{
-    if (s_str_mouse.mode == 0 || (now - s_str_mouse.last_ms) < s_str_mouse.period_ms) return;
-    s_str_mouse.last_ms = now;
-    uint8_t p[8] = {
-        s_snap_buttons,
-        (uint8_t)s_snap_dx, (uint8_t)(s_snap_dx >> 8),
-        (uint8_t)s_snap_dy, (uint8_t)(s_snap_dy >> 8),
-        (uint8_t)s_snap_wheel,
-        0, 0,  // pan, tilt — no source
-    };
-    tlm_send(TYPE_TLM_MOUSE, p, sizeof(p));
-}
-
-static void stream_emit_kb(uint32_t now)
-{
-    if (s_str_kb.mode == 0 || (now - s_str_kb.last_ms) < s_str_kb.period_ms) return;
-    s_str_kb.last_ms = now;
-    uint8_t p[7];
-    p[0] = g_kb_modifier;
-    memcpy(&p[1], s_snap_keys, 6);
-    tlm_send(TYPE_TLM_KB, p, sizeof(p));
-}
-
 // ── public API ──────────────────────────────────────────────────────────────
 void hurra_init(void)
 {
@@ -668,13 +592,7 @@ void hurra_init(void)
     s_reboot_at = 0;
     s_baud_pending = 0;
     s_baud_apply_at = 0;
-    memset(&s_str_axis, 0, sizeof(s_str_axis));
-    memset(&s_str_btn,  0, sizeof(s_str_btn));
-    memset(&s_str_mouse, 0, sizeof(s_str_mouse));
-    memset(&s_str_kb,   0, sizeof(s_str_kb));
     s_cb_buttons = s_cb_axes = s_cb_keys = 0;
-    s_snap_buttons = 0; s_snap_dx = s_snap_dy = 0; s_snap_wheel = 0;
-    memset(s_snap_keys, 0, sizeof(s_snap_keys));
     memset(s_last_keys_emitted, 0, sizeof(s_last_keys_emitted));
     s_screen_w = s_screen_h = 0;
     memset(&s_catch, 0, sizeof(s_catch));
@@ -720,10 +638,6 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_REBOOT, l_reboot);
     TF_AddTypeListener(&s_tf, TYPE_BAUD,   l_baud);
     TF_AddTypeListener(&s_tf, TYPE_SCREEN, l_screen);
-    TF_AddTypeListener(&s_tf, TYPE_STREAM_AXIS,  l_stream_axis);
-    TF_AddTypeListener(&s_tf, TYPE_STREAM_BTN,   l_stream_btn);
-    TF_AddTypeListener(&s_tf, TYPE_STREAM_MOUSE, l_stream_ms);
-    TF_AddTypeListener(&s_tf, TYPE_STREAM_KB,    l_stream_kb);
     TF_AddTypeListener(&s_tf, TYPE_CB_BUTTONS,   l_cb_btn);
     TF_AddTypeListener(&s_tf, TYPE_CB_AXES,      l_cb_axes);
     TF_AddTypeListener(&s_tf, TYPE_CB_KEYS,      l_cb_keys);
@@ -739,16 +653,6 @@ void hurra_tick(void)
 {
     uint32_t now = millis();
     TF_Tick(&s_tf);
-
-    stream_emit_axis(now);
-    stream_emit_btn(now);
-    stream_emit_mouse(now);
-    stream_emit_kb(now);
-
-    // No unconditional TLM_STATS push: flooding stats every 100ms is unsolicited
-    // noise on a request/reply link, and (with no SOF byte) it desyncs a freshly
-    // opened client's parser so it misses the first reply. Stats stay available
-    // on demand via the STATS request (l_stats).
 
     if (s_catch.active && now >= s_catch.deadline) {
         uint8_t p[8];
@@ -774,7 +678,6 @@ void hurra_tick(void)
 
 void hurra_notify_buttons(uint8_t buttons)
 {
-    s_snap_buttons = buttons;
     if (s_cb_buttons && buttons != s_last_btn_emitted) {
         s_last_btn_emitted = buttons;
         tlm_send(TYPE_TLM_BUTTONS, &buttons, 1);
@@ -783,7 +686,6 @@ void hurra_notify_buttons(uint8_t buttons)
 
 void hurra_notify_axes(int16_t dx, int16_t dy, int8_t scroll)
 {
-    s_snap_dx = dx; s_snap_dy = dy; s_snap_wheel = scroll;
     if (s_catch.active) { s_catch.accum_x += dx; s_catch.accum_y += dy; }
     if (s_cb_axes) {
         uint8_t p[5] = {
@@ -797,7 +699,6 @@ void hurra_notify_axes(int16_t dx, int16_t dy, int8_t scroll)
 
 void hurra_notify_keys(const uint8_t keys[6])
 {
-    memcpy(s_snap_keys, keys, 6);
     if (s_cb_keys && memcmp(keys, s_last_keys_emitted, 6) != 0) {
         memcpy(s_last_keys_emitted, keys, 6);
         uint8_t p[7];
