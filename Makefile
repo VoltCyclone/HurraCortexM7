@@ -40,7 +40,7 @@ LDFLAGS = $(MCU_FLAGS) \
 
 CORE_SRC = core/startup.c core/bootdata.c
 SRC = src/main.c src/usb_host.c src/usb_device.c src/desc_capture.c \
-      src/kmbox.c src/humanize.c src/smooth.c src/actions.c \
+      src/kmbox.c src/humanize.c src/smooth.c src/actions.c src/led.c \
       $(PROTO_SRC)
 
 OBJ = $(CORE_SRC:.c=.o) $(SRC:.c=.o)
