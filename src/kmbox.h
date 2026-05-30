@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "desc_capture.h"
-#include "ferrum.h"
 
 void kmbox_init(void);
 
@@ -35,6 +34,7 @@ uint32_t kmbox_uart_overrun(void);  // OR: FIFO overrun
 uint32_t kmbox_uart_framing(void);  // FE: baud mismatch / signal
 uint32_t kmbox_uart_noise(void);    // NF: electrical noise
 uint32_t kmbox_tx_overflow(void);   // bytes dropped when tx_ring was full
-uint8_t  kmbox_protocol_mode(void); // 0=idle, 1=Ferrum
+uint32_t kmbox_rx_drv_overrun(void);
+uint16_t kmbox_tx_room(void);
 void     kmbox_set_baud(uint32_t baud);
 uint32_t kmbox_current_baud(void);

@@ -6,6 +6,7 @@
 #include "smooth.h"
 #include "imxrt.h"
 #include "usb_device.h"
+#include "proto.h"
 #include <string.h>
 
 extern uint32_t millis(void);
@@ -126,13 +127,12 @@ static uint32_t frames_ok;
 static uint32_t frames_err;
 static uint32_t rx_bytes_total;
 
-static uint8_t detected_proto;
-
 static uint32_t current_baud = CMD_BAUD;
 
 static uint32_t uart_overrun_count;
 static uint32_t uart_framing_count;
 static uint32_t uart_noise_count;
+static uint32_t rx_drv_overrun_count;
 
 static uint32_t tx_bytes_total;
 static uint32_t tx_stuck_count;
@@ -262,6 +262,11 @@ static uint32_t compute_baud_reg(uint32_t baud)
 
 void kmbox_init(void)
 {
+	// Hardening: pin the LPUART root clock to the 24 MHz crystal oscillator
+	// (UART_CLK_SEL=1) with no post-divider (UART_CLK_PODF=0) so compute_baud_reg's
+	// UART_CLOCK=24e6 assumption is guaranteed rather than inherited from the
+	// bootloader/core. RM §14 (CCM): CCM_CSCDR1[UART_CLK_SEL], [UART_CLK_PODF].
+	CCM_CSCDR1 = (CCM_CSCDR1 & ~CCM_CSCDR1_UART_CLK_PODF(0x3F)) | CCM_CSCDR1_UART_CLK_SEL;
 	CCM_CCGR0 |= CCM_CCGR0_LPUART3(CCM_CCGR_ON);
 	// TX = pin 17 = GPIO_AD_B1_06 ALT2 = LPUART3_TX
 	IOMUXC_SW_MUX_CTL_PAD_GPIO_AD_B1_06 = 2;
@@ -349,7 +354,7 @@ void kmbox_init(void)
 
 	tx_head = 0;
 	tx_tail_pos = 0;
-	// ferrum_reset() not called here — ferrum_init() below zeroes the same
+	// proto_reset() not called here — proto_init() below zeroes the same
 	// fields (plus callback state).  Reset remains in error paths only.
 	memset(&inject, 0, sizeof(inject));
 	frames_ok = 0;
@@ -360,6 +365,7 @@ void kmbox_init(void)
 	uart_overrun_count = 0;
 	uart_framing_count = 0;
 	uart_noise_count = 0;
+	rx_drv_overrun_count = 0;
 
 	cached_mouse_ep = 0;
 	cached_mouse_maxpkt = 0;
@@ -371,8 +377,8 @@ void kmbox_init(void)
 	link_last_rx_time = 0;
 	last_rx_activity_time = 0;
 
-	ferrum_set_tx(uart_tx_frame);
-	ferrum_init();
+	proto_set_tx(uart_tx_frame);
+	proto_init();
 	smooth_init(1000); // default 1kHz, main.c re-inits with actual rate
 }
 
@@ -633,7 +639,7 @@ void kmbox_poll_fast(void)
 	}
 
 	// Drive catch_xy deadline check even when no UART RX is arriving.
-	ferrum_tick();
+	proto_tick();
 
 	if (__builtin_expect(inject.click_release_at != 0, 0) && millis() >= inject.click_release_at) {
 		inject.mouse_buttons &= ~inject.click_release_mask;
@@ -681,7 +687,7 @@ void kmbox_poll_heavy(void)
 		if (stat & LPUART_STAT_NF) uart_noise_count++;
 		KM_UART_STAT = stat & (LPUART_STAT_OR | LPUART_STAT_FE | LPUART_STAT_NF);
 		if (stat & (LPUART_STAT_OR | LPUART_STAT_FE)) {
-			ferrum_reset();
+			proto_reset();
 		}
 		GPIO1_DR_TOGGLE = STATUS_LED_BIT;
 	}
@@ -692,17 +698,39 @@ void kmbox_poll_heavy(void)
 		link_last_rx_time = millis();
 		last_rx_activity_time = link_last_rx_time;
 	}
-	while (rx_tail != head) {
-		uint8_t b = dma_rx_ring[rx_tail];
-		rx_tail = (rx_tail + 1) & (DMA_RX_RING_SIZE - 1);
-		rx_bytes_total++;
-		ferrum_feed_byte(b);
-		if (b == '\r' || b == '\n') {
-			tx_flush();
-			frames_ok++;
-			detected_proto = 1;
-			GPIO3_DR_TOGGLE = STATE_LED_BIT;
+
+	// Driver-overrun heuristic: if the HW write pointer has run >=3/4 of the
+	// ring ahead of the SW read pointer, bytes were almost certainly lost (the
+	// eDMA ring wraps silently). Count it, snap rp to wp to skip the stale
+	// span, and reset the parser so the next valid frame realigns cleanly.
+	{
+		uint16_t gap = (uint16_t)((head - rx_tail) & (DMA_RX_RING_SIZE - 1));
+		if (__builtin_expect(gap > (DMA_RX_RING_SIZE * 3u / 4u), 0)) {
+			rx_drv_overrun_count++;
+			rx_tail = head;
+			proto_reset();
+			GPIO1_DR_TOGGLE = STATUS_LED_BIT;
 		}
+	}
+
+	if (rx_tail != head) {
+		// Feed the whole burst in <=2 contiguous spans (batch TF_Accept).
+		uint16_t count = (uint16_t)((head - rx_tail) & (DMA_RX_RING_SIZE - 1));
+		if (head > rx_tail) {
+			proto_feed(&dma_rx_ring[rx_tail], (uint16_t)(head - rx_tail));
+		} else {
+			proto_feed(&dma_rx_ring[rx_tail],
+			           (uint16_t)(DMA_RX_RING_SIZE - rx_tail));
+			if (head) proto_feed(&dma_rx_ring[0], head);
+		}
+		rx_bytes_total += count;
+		frames_ok++;                       // counts RX bursts processed
+		GPIO3_DR_TOGGLE = STATE_LED_BIT;
+		rx_tail = head;
+		// Immediate reply flush: any reply/telemetry the parser queued during
+		// the feed leaves in one DMA TX on this same poll, instead of waiting
+		// for the next poll_fast tick. Protocol-agnostic latency win.
+		tx_flush();
 	}
 }
 
@@ -725,7 +753,7 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 
 			if (__builtin_expect(mouse_layout.fast_path && rid == mouse_layout.report_id, 1)) {
 				report[doff] |= inject.mouse_buttons;
-				ferrum_notify_buttons(report[doff]);
+				proto_notify_buttons(report[doff]);
 
 				if (mouse_layout.x_is16) {
 					int32_t rx = (int16_t)(report[mouse_layout.x_byte] |
@@ -775,11 +803,11 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 						if (mw < -mouse_layout.w_max) mw = -mouse_layout.w_max;
 						report[mouse_layout.w_byte] = (uint8_t)(int8_t)mw;
 					}
-					// Wheel zero deferred until after ferrum_notify_axes so the
+					// Wheel zero deferred until after proto_notify_axes so the
 					// callback sees the actual scroll value, not 0.
 				}
 
-				ferrum_notify_axes(inject.mouse_dx, inject.mouse_dy,
+				proto_notify_axes(inject.mouse_dx, inject.mouse_dy,
 				                   inject.mouse_wheel);
 				if (mouse_layout.w_byte != 0xFF)
 					inject.mouse_wheel = 0;
@@ -806,7 +834,7 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 
 	if (rid == mouse_layout.report_id) {
 		report[doff] |= inject.mouse_buttons;
-		ferrum_notify_buttons(report[doff]);
+		proto_notify_buttons(report[doff]);
 
 		int32_t rx = read_report_field(report, len, mouse_layout.x_bit,
 		                               mouse_layout.x_size, doff);
@@ -839,7 +867,7 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 		wheel_consumed = true;
 	}
 
-	ferrum_notify_axes(inject.mouse_dx, inject.mouse_dy,
+	proto_notify_axes(inject.mouse_dx, inject.mouse_dy,
 	                   inject.mouse_wheel);
 	inject.mouse_dx = 0;
 	inject.mouse_dy = 0;
@@ -872,7 +900,7 @@ static void kmbox_merge_keyboard(uint8_t *report, uint8_t len)
 			}
 		}
 	}
-	ferrum_notify_keys(&report[2]);
+	proto_notify_keys(&report[2]);
 }
 
 __attribute__((cold, noinline))
@@ -987,7 +1015,6 @@ static void baud_change_apply(uint32_t baud)
 	KM_UART_CTRL |= LPUART_CTRL_TE | LPUART_CTRL_RE;
 
 	current_baud = baud;
-	detected_proto = 0;
 }
 
 void kmbox_set_baud(uint32_t baud)
@@ -1006,7 +1033,16 @@ uint32_t kmbox_uart_overrun(void) { return uart_overrun_count; }
 uint32_t kmbox_uart_framing(void) { return uart_framing_count; }
 uint32_t kmbox_uart_noise(void) { return uart_noise_count; }
 uint32_t kmbox_tx_overflow(void) { return tx_overflow_count; }
-uint8_t  kmbox_protocol_mode(void) { return detected_proto; }
+uint32_t kmbox_rx_drv_overrun(void) { return rx_drv_overrun_count; }
+
+uint16_t kmbox_tx_room(void)
+{
+	// Bytes free in the TX ring. Telemetry emitters skip a frame when the ring
+	// would overflow; input listeners never skip.
+	uint16_t used = (uint16_t)((tx_head - tx_tail_pos) & (TX_RING_SIZE - 1));
+	return (uint16_t)(TX_RING_SIZE - 1 - used);
+}
+
 __attribute__((section(".fastrun")))
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
                                int8_t wheel, bool use_smooth)
