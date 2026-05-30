@@ -20,7 +20,6 @@ Bare-metal USB proxy firmware for NXP i.MX RT1062. Man-in-the-middle USB HID dev
 - Actions: transport-agnostic `act_*` functions in `src/actions.c` (drive `kmbox_inject_*`).
 
 ## Key Files
-- `src/ferrum.c` / `src/ferrum.h` — Ferrum ASCII parser, line accumulator, dispatch table, callbacks
 - `src/actions.c` / `src/actions.h` — transport-agnostic `act_*` action helpers
 - `src/kmbox.c` — UART transport (LPUART3 on pins 16/17, no flow control), DMA, injection state, HID report merging
 - `src/hurra.c` / `src/hurra.h` — Hurra binary protocol parser (TinyFrame), default
