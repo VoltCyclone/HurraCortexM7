@@ -377,8 +377,11 @@ void kmbox_init(void)
 	link_last_rx_time = 0;
 	last_rx_activity_time = 0;
 
-	proto_set_tx(uart_tx_frame);
+	// Order matters: hurra_init() zeroes its TX pointer (ferrum_init() does
+	// not), so the transport MUST be installed *after* proto_init() or the
+	// Hurra build never transmits (TF_WriteImpl no-ops on a NULL s_tx).
 	proto_init();
+	proto_set_tx(uart_tx_frame);
 	smooth_init(1000); // default 1kHz, main.c re-inits with actual rate
 }
 
