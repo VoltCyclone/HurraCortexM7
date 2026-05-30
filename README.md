@@ -1,13 +1,13 @@
 # hurra v2 - USB HS
 
-Bare-metal USB HID man-in-the-middle firmware for the **SparkFun MicroMod Teensy** (NXP i.MX RT1062). Enumerates a real USB HID device on the host port, replays it on the device port to the Mac/PC, and accepts **Ferrum text protocol** commands over UART to inject mouse/keyboard input on top of the live HID stream.
+Bare-metal USB HID man-in-the-middle firmware for the **SparkFun MicroMod Teensy** (NXP i.MX RT1062). Enumerates a real USB HID device on the host port, replays it on the device port to the Mac/PC, and accepts **Hurra binary protocol** commands over UART (default) to inject mouse/keyboard input on top of the live HID stream. A **Ferrum ASCII** compatibility mode is available via `make PROTOCOL=ferrum`.
 
-Drop-in compatible with software written for the [Ferrum](https://ferrumllc.github.io/) and km.box B-family devices.
+The host-side adapter is [`hurra-app`](https://github.com/VoltCyclone/hurra-app) (`hurra-bridge`), which also exposes a Ferrum-compatible virtual COM port for legacy tools.
 
 ## Hardware
 
 - **SparkFun MicroMod Teensy** on the **MicroMod ATP Carrier Board**.
-- **Silicon Labs CP2102C** USB-UART bridge wired to Teensy `RX2`/`TX2` (D16/D17 → LPUART3; ATP carrier UART_RX2/UART_TX2 headers).
+- **WCH CH343** USB-UART bridge wired to Teensy `RX2`/`TX2` (D16/D17 -> LPUART3; ATP carrier UART_RX2/UART_TX2 headers). USB Full Speed, up to 6 Mbaud, 64-byte bulk MPS.
 - A USB HID device (mouse, keyboard, controller) on the Teensy's USB host port.
 - Teensy USB device port to the host PC.
 
@@ -18,34 +18,28 @@ Drop-in compatible with software written for the [Ferrum](https://ferrumllc.gith
                           ↑
                           │ km.* commands
                           │
-   Host PC USB ──→ CP2102C ──→ Teensy LPUART3 (D16/D17)
+   Host PC USB ──→ CH343 ──→ Teensy LPUART3 (D16/D17)
 ```
 
 ## Wire protocol
 
-ASCII text, `\r\n`-terminated, 115200 baud (resets to 115200 every power cycle). No echo, no `>>> ` prompt. Reference: <https://ferrumllc.github.io/print.html>.
+**Default — Hurra binary (TinyFrame):** SOF `0x68`, 1-byte ID/LEN/TYPE, CRC16. Little-endian payloads. Driven by `hurra-app`/`hurra-bridge`; see that repo for the host API. Targets >=8k commands/sec at 4 Mbps over the CH343 link.
+
+**Compatibility — Ferrum ASCII** (`make PROTOCOL=ferrum`): `\r\n`-terminated text, 115200 baud (resets to 115200 every power cycle). Reference: <https://ferrumllc.github.io/print.html>.
 
 ```
 TX: km.version()\r\n
 RX: kmbox: Ferrum\r\n
-
 TX: km.move(10, -5)\r\n          # write — no reply
-TX: km.left(1)\r\n               # left button down
-TX: km.left()\r\n                # read — replies 1\r\n
-TX: km.click(0)\r\n              # left click (0=L 1=R 2=M 3=rear 4=front)
-TX: km.wheel(1)\r\n              # one wheel tick up
-TX: km.down(4)\r\n               # press 'A' (HID HUT 1.5 codes)
-TX: km.init()\r\n                # release every key/button
 TX: m(2, 0)\r\n                  # alias for km.move
 ```
-
-Full command surface: `version`, `move`, `m`, `left`/`right`/`middle`/`side1`/`side2`, `click`, `wheel`, `lock_m{l,r,m,s1,s2,x,y}`, `catch_xy`, `down`/`up`/`press`/`multidown`/`multiup`/`multipress`, `isdown`, `mask`, `init`, `buttons`/`axes`/`keys` (callbacks), `baud`.
 
 ## Build & flash
 
 ```sh
-make           # produces firmware.hex
-make flash     # flashes via teensy_loader_cli
+make                 # produces firmware.hex (Hurra binary protocol, default)
+make PROTOCOL=ferrum # build with Ferrum ASCII protocol instead
+make flash           # flashes via teensy_loader_cli
 ```
 
 Requires:
@@ -77,7 +71,9 @@ src/usb_host.c/.h     EHCI host (USB2)
 src/usb_device.c/.h   EHCI device (USB1)
 src/desc_capture.*    descriptor + HID report-layout capture
 src/kmbox.c/.h        LPUART3 DMA RX/TX ring + HID merge
-src/ferrum.c/.h       Ferrum ASCII parser + dispatch + callbacks
+src/hurra.c/.h        Hurra binary parser (TinyFrame) — default protocol
+src/ferrum.c/.h       Ferrum ASCII parser (opt-in: PROTOCOL=ferrum)
+src/proto.h           compile-time protocol selector
 src/actions.c/.h      transport-agnostic injection helpers (act_*)
 src/smooth.c/.h       bezier-smoothed motion queue
 src/humanize.c/.h     sub-pixel jitter + dwell
