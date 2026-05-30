@@ -431,10 +431,6 @@ static void handle_class_request(const usb_setup_t *setup)
 	// Forward every class request to the upstream device. handle_passthrough()
 	// handles IN (synchronous round-trip), OUT-with-data (receive → ACK → defer
 	// forward), and OUT-no-data (ACK → defer forward) directions automatically.
-	//
-	// Previously we answered five of six HID class requests locally with stub
-	// data (GET_REPORT → zeros, GET_PROTOCOL → 1, SET_IDLE/SET_PROTOCOL → ACK,
-	// GET_IDLE → STALL because missing from switch). All five are now forwarded.
 	handle_passthrough(setup);
 }
 // Blocking receive of EP0 OUT data phase (for control transfers with host-to-device data).

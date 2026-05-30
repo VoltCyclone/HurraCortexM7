@@ -78,7 +78,7 @@ void TF_WriteImpl(TinyFrame *tf, const uint8_t *buf, uint32_t len)
     if (s_tx) s_tx(buf, (uint16_t)len);
 }
 
-// ── stats counters (exposed via STATS frame in Phase 6) ─────────────────────
+// ── stats counters ──────────────────────────────────────────────────────────
 static uint32_t s_rx_frames_ok;
 static uint32_t s_head_crc_err;
 static uint32_t s_payload_crc_err;
@@ -596,11 +596,9 @@ void hurra_init(void)
     memset(s_last_keys_emitted, 0, sizeof(s_last_keys_emitted));
     s_screen_w = s_screen_h = 0;
     memset(&s_catch, 0, sizeof(s_catch));
-    // Admin listeners (Task 4.2)
     TF_AddTypeListener(&s_tf, TYPE_PING,    l_ping);
     TF_AddTypeListener(&s_tf, TYPE_VERSION, l_version);
     TF_AddTypeListener(&s_tf, TYPE_STATS,   l_stats);
-    // Mouse listeners (Task 4.3)
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_MOVE,        l_mouse_move);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_MOVE_SMOOTH, l_mouse_move_smooth);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_SILENT_MOVE, l_mouse_silent);
@@ -608,7 +606,6 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_CLICK,       l_mouse_click);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_WHEEL,       l_mouse_wheel);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_GETPOS,      l_mouse_getpos);
-    // Button + invert/swap listeners (Task 4.4)
     TF_AddTypeListener(&s_tf, TYPE_BTN_LEFT,   l_btn_left);
     TF_AddTypeListener(&s_tf, TYPE_BTN_RIGHT,  l_btn_right);
     TF_AddTypeListener(&s_tf, TYPE_BTN_MIDDLE, l_btn_middle);

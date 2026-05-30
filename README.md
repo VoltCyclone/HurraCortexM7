@@ -48,9 +48,14 @@ Requires:
 
 ## Test
 
+`ferrum_test.py` speaks Ferrum ASCII, so point it at a `PROTOCOL=ferrum` build's
+serial port **or** at the `hurra-bridge` PTY symlink (`~/.hurra-bridge.tty`) when
+running the default Hurra firmware — not directly at a Hurra build's port.
+
 ```sh
 pip install pyserial
-tools/ferrum_test.py /dev/tty.usbserial-XXXX smoke
+tools/ferrum_test.py ~/.hurra-bridge.tty smoke      # via the bridge (Hurra firmware)
+tools/ferrum_test.py /dev/tty.usbserial-XXXX smoke  # direct (PROTOCOL=ferrum build)
 ```
 
 That handshakes `km.version()`, nudges the mouse, exercises buttons + wheel, and validates the read forms. For a closed-loop aim test that drives the cursor toward on-screen dots:

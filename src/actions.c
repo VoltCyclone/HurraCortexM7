@@ -1,9 +1,4 @@
-// src/actions.c — transport-agnostic injection actions
-//
-// These functions drive kmbox_inject_mouse / kmbox_inject_keyboard and own
-// the mouse/keyboard state.  They have no knowledge of any wire protocol;
-// Protocol handlers (ferrum.c) call them by name. These are transport-agnostic —
-// they own the injection state and call kmbox_inject_* / smooth_inject.
+// src/actions.c — transport-agnostic injection actions (mouse + keyboard state)
 
 #include "actions.h"
 #include "kmbox.h"
@@ -181,8 +176,6 @@ void act_kb_mask(uint8_t key, uint8_t mode)
 		}
 	}
 }
-
-// ── wheel / invert / swap ────────────────────────────────────────────────────
 
 void act_wheel(int8_t ticks)
 {
