@@ -11,6 +11,7 @@ Bare-metal USB proxy firmware for NXP i.MX RT1062. Man-in-the-middle USB HID dev
 
 ## Protocol
 - **Default: Hurra binary protocol** — TinyFrame-based (SOF `0x68`, 1-byte ID/LEN/TYPE, CRC16), targeting >=8k cmds/sec at 4 Mbps. Built by `make` (no flag). Implementation in `src/hurra.c` + `src/third_party/TinyFrame/`. Host adapter: `hurra-app` (`hurra-bridge`).
+  - Boots at **4 Mbaud** (`CMD_BAUD` default for the hurra build), matching the hurra-bridge/hello default — no `--baud` needed. `km.baud(N)` bumps it; after a bump the firmware auto-resets to the boot default (4 Mbaud) on extended RX idle. Override the build default with `make CMD_BAUD=N`.
 - **Opt-in: Ferrum ASCII text protocol** (`make PROTOCOL=ferrum`) — https://ferrumllc.github.io/print.html
   - Wire: `km.<name>(<args>)\r\n` (also accepts `\n` only). Alias `m(x,y)` for move.
   - Default baud 115200, resets to 115200 every power cycle. `km.baud(N)` to bump.

@@ -619,14 +619,14 @@ void kmbox_poll_fast(void)
 	    KM_TX_CITER != KM_TX_BITER)
 		tx_flush();
 
-	// Auto-reset baud to 115200 after extended RX idle so a host that closes
-	// and reopens the VCOM (without power-cycling the device) gets a clean
-	// recovery — Ferrum's spec resets baud on power cycle only, but the host
-	// has no way to know the current rate after reopening the port.
-	if (__builtin_expect(current_baud != 115200 && pending_baud_rate == 0 &&
+	// Auto-reset baud to the boot default (CMD_BAUD) after extended RX idle so a
+	// host that closes and reopens the VCOM (without power-cycling) recovers at
+	// the known default rate after any km.baud() bump. Targets CMD_BAUD, not a
+	// hardcoded 115200, so a 4 Mbaud Hurra default isn't downgraded mid-session.
+	if (__builtin_expect(current_baud != CMD_BAUD && pending_baud_rate == 0 &&
 	                     last_rx_activity_time != 0 &&
 	                     (millis() - last_rx_activity_time) > BAUD_IDLE_RESET_MS, 0)) {
-		pending_baud_rate = 115200;
+		pending_baud_rate = CMD_BAUD;
 	}
 
 	// Deferred baud change: apply only when TX is fully idle. We can't use
