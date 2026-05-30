@@ -23,7 +23,7 @@ The host-side adapter is [`hurra-app`](https://github.com/VoltCyclone/hurra-app)
 
 ## Wire protocol
 
-**Default — Hurra binary (TinyFrame):** SOF `0x68`, 1-byte ID/LEN/TYPE, CRC16. Little-endian payloads. Driven by `hurra-app`/`hurra-bridge`; see that repo for the host API. Targets >=8k commands/sec at 4 Mbps over the CH343 link.
+**Default — Hurra binary (TinyFrame):** SOF `0x68`, 1-byte ID/LEN/TYPE, CRC16. Little-endian payloads. Driven by `hurra-app`/`hurra-bridge`; see that repo for the host API. Targets >=8k commands/sec at 4 Mbps over the CH343 link. Boots at **4 Mbaud** (matching the bridge/hello default, so no `--baud` flag is needed); `km.baud(N)` bumps it and the firmware falls back to the 4 Mbaud boot default after extended RX idle.
 
 **Compatibility — Ferrum ASCII** (`make PROTOCOL=ferrum`): `\r\n`-terminated text, 115200 baud (resets to 115200 every power cycle). Reference: <https://ferrumllc.github.io/print.html>.
 

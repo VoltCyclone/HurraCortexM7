@@ -7,16 +7,19 @@ TARGET = firmware
 
 MCU_FLAGS = -mcpu=cortex-m7 -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb
 
-# UART baud for kmbox <-> host link.  LPUART3 on Teensy pins 16/17 (ATP UART_RX2/UART_TX2), no flow control.
-CMD_BAUD ?= 115200
-
 # Protocol selector: 'hurra' (binary, TinyFrame, default) or 'ferrum' (ASCII).
 PROTOCOL ?= hurra
 
+# UART baud for kmbox <-> host link (LPUART3, Teensy pins 16/17, no flow control).
+# Hurra defaults to 4 Mbps (its design target, matching the hurra-app/hurra-bridge
+# default); Ferrum keeps 115200, the power-on default the Ferrum spec mandates.
+# Override either with `make CMD_BAUD=N`.
 ifeq ($(PROTOCOL),hurra)
+  CMD_BAUD ?= 4000000
   PROTO_DEF = -DPROTOCOL_HURRA
   PROTO_SRC = src/hurra.c src/third_party/TinyFrame/TinyFrame.c
 else ifeq ($(PROTOCOL),ferrum)
+  CMD_BAUD ?= 115200
   PROTO_DEF = -DPROTOCOL_FERRUM
   PROTO_SRC = src/ferrum.c
 else
