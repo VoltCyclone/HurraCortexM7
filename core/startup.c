@@ -350,8 +350,7 @@ static void ResetHandler2(void)
 	unsigned int i;
 	__asm__ volatile("dsb":::"memory");
 
-	// Hardware settling delay — official Teensy startup requires these
-	// "Some optimization with LTO won't start without this delay, but why?"
+	// Hardware settling delay — required for LTO-compiled builds to start reliably
 	asm volatile("nop");
 	asm volatile("nop");
 	asm volatile("nop");

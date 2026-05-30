@@ -295,7 +295,6 @@ void kmbox_init(void)
 
 	uint32_t baud_reg = compute_baud_reg(UART_BAUD);
 	if (baud_reg == 0) {
-		// Build-time default rate is known-good; this should be unreachable.
 		// Fallback: 115200 with OSR=16 (field=15), SBR=13 → 115384 (-0.16%).
 		baud_reg = LPUART_BAUD_OSR(15) | LPUART_BAUD_SBR(13);
 	}
