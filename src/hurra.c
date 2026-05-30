@@ -124,10 +124,6 @@ static struct {
     uint8_t  reply_id;
 } s_catch;
 
-// ── auto stats push ─────────────────────────────────────────────────────────
-#define STATS_PERIOD_MS 100
-static uint32_t s_stats_next_ms;
-
 // ── helpers ─────────────────────────────────────────────────────────────────
 static inline int16_t  rd_i16le(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
 static inline uint16_t rd_u16le(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
@@ -682,7 +678,6 @@ void hurra_init(void)
     memset(s_last_keys_emitted, 0, sizeof(s_last_keys_emitted));
     s_screen_w = s_screen_h = 0;
     memset(&s_catch, 0, sizeof(s_catch));
-    s_stats_next_ms = STATS_PERIOD_MS;
     // Admin listeners (Task 4.2)
     TF_AddTypeListener(&s_tf, TYPE_PING,    l_ping);
     TF_AddTypeListener(&s_tf, TYPE_VERSION, l_version);
@@ -750,12 +745,10 @@ void hurra_tick(void)
     stream_emit_mouse(now);
     stream_emit_kb(now);
 
-    if (now >= s_stats_next_ms) {
-        s_stats_next_ms = now + STATS_PERIOD_MS;
-        uint8_t buf[36];
-        pack_stats(buf);
-        tlm_send(TYPE_TLM_STATS, buf, sizeof(buf));
-    }
+    // No unconditional TLM_STATS push: flooding stats every 100ms is unsolicited
+    // noise on a request/reply link, and (with no SOF byte) it desyncs a freshly
+    // opened client's parser so it misses the first reply. Stats stay available
+    // on demand via the STATS request (l_stats).
 
     if (s_catch.active && now >= s_catch.deadline) {
         uint8_t p[8];
