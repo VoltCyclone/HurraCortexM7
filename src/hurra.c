@@ -199,7 +199,7 @@ static TF_Result l_mouse_move(TinyFrame *tf, TF_Msg *msg)
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
     int16_t dx = rd_i16le(&msg->data[0]);
     int16_t dy = rd_i16le(&msg->data[2]);
-    act_move(dx, dy, false);
+    act_move(dx, dy);
     return TF_STAY;
 }
 
@@ -208,7 +208,7 @@ static TF_Result l_mouse_move_smooth(TinyFrame *tf, TF_Msg *msg)
     (void)tf;
     track_id(msg->frame_id);
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
-    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), false);
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]));
     return TF_STAY;
 }
 
@@ -217,7 +217,7 @@ static TF_Result l_mouse_silent(TinyFrame *tf, TF_Msg *msg)
     (void)tf;
     track_id(msg->frame_id);
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
-    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), false);
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]));
     return TF_STAY;
 }
 
@@ -233,7 +233,7 @@ static TF_Result l_mouse_mo(TinyFrame *tf, TF_Msg *msg)
     // pan/tilt (data[6], data[7]) accepted but dropped — no HID transport.
     act_button_set(buttons ^ g_buttons, 0);
     act_button_set(buttons, 1);
-    act_move(dx, dy, false);
+    act_move(dx, dy);
     if (wheel) act_wheel(wheel);
     return TF_STAY;
 }

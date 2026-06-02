@@ -240,7 +240,7 @@ static void cmd_move(arg_t *args, uint8_t nargs)
 	if (x < INT16_MIN) x = INT16_MIN;
 	if (y > INT16_MAX) y = INT16_MAX;
 	if (y < INT16_MIN) y = INT16_MIN;
-	act_move((int16_t)x, (int16_t)y, false);
+	act_move((int16_t)x, (int16_t)y);
 }
 
 // Generic button handler.  mask is the bit in g_buttons.
@@ -273,7 +273,7 @@ static void cmd_wheel(arg_t *args, uint8_t nargs)
 	if (!parse_int(args[0].p, args[0].len, &n)) return;
 	if (n > INT8_MAX) n = INT8_MAX;
 	if (n < INT8_MIN) n = INT8_MIN;
-	kmbox_inject_mouse(0, 0, g_buttons, (int8_t)n, false);
+	kmbox_inject_mouse(0, 0, g_buttons, (int8_t)n);
 }
 
 // Generic lock handler.  bit is the LOCK_BIT_* index.

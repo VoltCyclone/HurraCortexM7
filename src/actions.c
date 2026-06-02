@@ -53,10 +53,10 @@ int8_t act_button_set(uint8_t mask, uint8_t action)
 {
 	if (action == 0) {
 		g_buttons &= ~mask;
-		kmbox_inject_mouse(0, 0, g_buttons, 0, false);
+		kmbox_inject_mouse(0, 0, g_buttons, 0);
 	} else if (action == 1) {
 		g_buttons |= mask;
-		kmbox_inject_mouse(0, 0, g_buttons, 0, false);
+		kmbox_inject_mouse(0, 0, g_buttons, 0);
 	} else if (action == 2) {
 		g_buttons &= ~mask;
 	} else {
@@ -69,7 +69,7 @@ void act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms)
 {
 	uint8_t mask = btn_idx_to_mask(button_1based);
 	g_buttons |= mask;
-	kmbox_inject_mouse(0, 0, g_buttons, 0, false);
+	kmbox_inject_mouse(0, 0, g_buttons, 0);
 
 	if (count == 1) {
 		kmbox_schedule_click_release(mask, delay_ms);
@@ -82,15 +82,14 @@ void act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms)
 	}
 }
 
-void act_move(int16_t dx, int16_t dy, bool smooth)
+void act_move(int16_t dx, int16_t dy)
 {
-	(void)smooth;
 	if (s_swap_xy)  { int16_t t = dx; dx = dy; dy = t; }
 	if (s_invert_x) dx = (int16_t)-dx;
 	if (s_invert_y) dy = (int16_t)-dy;
 	g_pos_x += dx;
 	g_pos_y += dy;
-	kmbox_inject_mouse(dx, dy, g_buttons, 0, false);
+	kmbox_inject_mouse(dx, dy, g_buttons, 0);
 }
 
 int8_t act_kb_down(uint8_t key)
@@ -178,7 +177,7 @@ void act_kb_mask(uint8_t key, uint8_t mode)
 
 void act_wheel(int8_t ticks)
 {
-	kmbox_inject_mouse(0, 0, g_buttons, ticks, false);
+	kmbox_inject_mouse(0, 0, g_buttons, ticks);
 }
 
 bool act_get_invert_x(void) { return s_invert_x; }

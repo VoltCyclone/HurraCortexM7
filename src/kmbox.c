@@ -171,7 +171,7 @@ static uint8_t cached_mouse_report_len; // actual report length from first real 
 static bool merged_this_cycle;
 
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
-                               int8_t wheel, bool use_smooth);
+                               int8_t wheel);
 static void baud_change_apply(uint32_t baud);
 
 static void tx_enqueue(uint8_t b)
@@ -1091,9 +1091,8 @@ uint16_t kmbox_tx_room(void)
 
 __attribute__((section(".fastrun")))
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
-                               int8_t wheel, bool use_smooth)
+                               int8_t wheel)
 {
-	(void)use_smooth;
 	inject.mouse_buttons = buttons;
 	inject.mouse_wheel += wheel;
 	inject.mouse_dx += dx;
@@ -1102,9 +1101,9 @@ static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
 }
 
 void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
-                        int8_t wheel, bool use_smooth)
+                        int8_t wheel)
 {
-	apply_mouse_result(dx, dy, buttons, wheel, use_smooth);
+	apply_mouse_result(dx, dy, buttons, wheel);
 }
 
 void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6])
