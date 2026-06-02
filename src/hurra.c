@@ -3,6 +3,7 @@
 #include "TinyFrame.h"
 #include "hurra.h"
 #include "actions.h"
+#include "humanize.h"
 #include "kmbox.h"
 #include "imxrt.h"
 #include <string.h>
@@ -30,6 +31,7 @@ enum {
     TYPE_INVERT_X          = 0x17,
     TYPE_INVERT_Y          = 0x18,
     TYPE_SWAP_XY           = 0x19,
+    TYPE_HUMAN             = 0x1A,
     TYPE_BTN_LEFT          = 0x20,
     TYPE_BTN_RIGHT         = 0x21,
     TYPE_BTN_MIDDLE        = 0x22,
@@ -197,7 +199,7 @@ static TF_Result l_mouse_move(TinyFrame *tf, TF_Msg *msg)
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
     int16_t dx = rd_i16le(&msg->data[0]);
     int16_t dy = rd_i16le(&msg->data[2]);
-    act_move(dx, dy, false);
+    act_move(dx, dy);
     return TF_STAY;
 }
 
@@ -206,7 +208,7 @@ static TF_Result l_mouse_move_smooth(TinyFrame *tf, TF_Msg *msg)
     (void)tf;
     track_id(msg->frame_id);
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
-    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), true);
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]));
     return TF_STAY;
 }
 
@@ -215,7 +217,7 @@ static TF_Result l_mouse_silent(TinyFrame *tf, TF_Msg *msg)
     (void)tf;
     track_id(msg->frame_id);
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
-    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), false);
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]));
     return TF_STAY;
 }
 
@@ -231,7 +233,7 @@ static TF_Result l_mouse_mo(TinyFrame *tf, TF_Msg *msg)
     // pan/tilt (data[6], data[7]) accepted but dropped — no HID transport.
     act_button_set(buttons ^ g_buttons, 0);
     act_button_set(buttons, 1);
-    act_move(dx, dy, false);
+    act_move(dx, dy);
     if (wheel) act_wheel(wheel);
     return TF_STAY;
 }
@@ -252,6 +254,17 @@ static TF_Result l_mouse_wheel(TinyFrame *tf, TF_Msg *msg)
     track_id(msg->frame_id);
     if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
     act_wheel((int8_t)msg->data[0]);
+    return TF_STAY;
+}
+
+static TF_Result l_human(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
+    uint8_t lvl = msg->data[0];
+    if (lvl > 3) lvl = 3;
+    humanize_set_level(lvl);
     return TF_STAY;
 }
 
@@ -614,6 +627,7 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_INVERT_X,   l_invert_x);
     TF_AddTypeListener(&s_tf, TYPE_INVERT_Y,   l_invert_y);
     TF_AddTypeListener(&s_tf, TYPE_SWAP_XY,    l_swap_xy);
+    TF_AddTypeListener(&s_tf, TYPE_HUMAN,      l_human);
     TF_AddTypeListener(&s_tf, TYPE_KB_DOWN,       l_kb_down);
     TF_AddTypeListener(&s_tf, TYPE_KB_UP,         l_kb_up);
     TF_AddTypeListener(&s_tf, TYPE_KB_PRESS,      l_kb_press);

@@ -43,7 +43,7 @@ LDFLAGS = $(MCU_FLAGS) \
 
 CORE_SRC = core/startup.c core/bootdata.c
 SRC = src/main.c src/usb_host.c src/usb_device.c src/desc_capture.c \
-      src/kmbox.c src/humanize.c src/smooth.c src/actions.c src/led.c \
+      src/kmbox.c src/humanize.c src/actions.c src/led.c \
       $(PROTO_SRC)
 
 OBJ = $(CORE_SRC:.c=.o) $(SRC:.c=.o)
@@ -58,7 +58,7 @@ $(TARGET).hex: $(TARGET).elf
 	$(OBJCOPY) -O ihex -R .eeprom $< $@
 
 # Hot-path sources get -O2 instead of -Os
-HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o src/smooth.o \
+HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o \
           src/humanize.o src/actions.o
 ifeq ($(PROTOCOL),hurra)
   HOT_SRC += src/hurra.o src/third_party/TinyFrame/TinyFrame.o
@@ -77,3 +77,11 @@ clean:
 	rm -f $(OBJ) $(TARGET).elf $(TARGET).hex
 
 .PHONY: all flash clean
+
+# Host-native unit tests (no cross-compile). humanize.c must stay free of
+# hardware headers behind HUMANIZE_HOSTTEST so it builds with system gcc.
+.PHONY: test
+test:
+	cc -std=c11 -O2 -DHUMANIZE_HOSTTEST -Isrc -o /tmp/humanize_test \
+	   test/humanize_test.c src/humanize.c -lm
+	/tmp/humanize_test

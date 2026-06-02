@@ -13,6 +13,7 @@
 
 #include "ferrum.h"
 #include "actions.h"
+#include "humanize.h"
 #include "kmbox.h"
 #include <string.h>
 
@@ -239,7 +240,7 @@ static void cmd_move(arg_t *args, uint8_t nargs)
 	if (x < INT16_MIN) x = INT16_MIN;
 	if (y > INT16_MAX) y = INT16_MAX;
 	if (y < INT16_MIN) y = INT16_MIN;
-	act_move((int16_t)x, (int16_t)y, false);
+	act_move((int16_t)x, (int16_t)y);
 }
 
 // Generic button handler.  mask is the bit in g_buttons.
@@ -272,7 +273,7 @@ static void cmd_wheel(arg_t *args, uint8_t nargs)
 	if (!parse_int(args[0].p, args[0].len, &n)) return;
 	if (n > INT8_MAX) n = INT8_MAX;
 	if (n < INT8_MIN) n = INT8_MIN;
-	kmbox_inject_mouse(0, 0, g_buttons, (int8_t)n, false);
+	kmbox_inject_mouse(0, 0, g_buttons, (int8_t)n);
 }
 
 // Generic lock handler.  bit is the LOCK_BIT_* index.
@@ -423,6 +424,16 @@ static void cmd_baud(arg_t *args, uint8_t nargs)
 	kmbox_set_baud((uint32_t)n);
 }
 
+static void cmd_human(arg_t *args, uint8_t nargs)
+{
+	if (nargs != 1) return;
+	int32_t n;
+	if (!parse_int(args[0].p, args[0].len, &n)) return;
+	if (n < 0) n = 0;
+	if (n > 3) n = 3;
+	humanize_set_level((uint8_t)n);
+}
+
 // =============================================================================
 // Dispatch
 // =============================================================================
@@ -474,6 +485,7 @@ static void dispatch(const char *name, uint8_t name_len, arg_t *args, uint8_t na
 	if (name_is(name, name_len, "keys"))         { cmd_cb_toggle(&s_cb_keys,    args, nargs); return; }
 
 	if (name_is(name, name_len, "baud"))         { cmd_baud(args, nargs); return; }
+	if (name_is(name, name_len, "human"))        { cmd_human(args, nargs); return; }
 
 	// Unknown — silent drop.
 }
