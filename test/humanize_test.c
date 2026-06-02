@@ -52,6 +52,34 @@ int main(void) {
     }
     CHECK(max_run < 200, "anti-quantization: no long identical-value run");
 
+    /* (E) In-frame delivery: a single small injection (<= cap) must land THIS
+     *     frame, not be smeared across many frames. Pure-X move has no
+     *     perpendicular noise on X, so dx should be ~the full injected amount. */
+    humanize_init(1000);
+    humanize_set_level(2);
+    int16_t edx = 20, edy = 0;
+    humanize_filter(&edx, &edy);
+    CHECK(edx >= 18, "in-frame: small injection delivered same frame");
+
+    /* (F) Field-clip carry: motion returned (because the report field couldn't
+     *     carry it this frame) is redelivered, not lost. Models an 8-bit field
+     *     with only 50 counts of headroom/frame; all 200 must still arrive. */
+    humanize_init(1000);
+    humanize_set_level(2);
+    {
+        long delivered = 0;
+        int16_t fdx = 200, fdy = 0;
+        humanize_filter(&fdx, &fdy);
+        for (int i = 0; i < 80; i++) {
+            int acc = fdx > 50 ? 50 : (fdx < -50 ? -50 : fdx); /* field headroom */
+            humanize_return((int16_t)(fdx - acc), 0);          /* carry the rest */
+            delivered += acc;
+            fdx = 0; fdy = 0;
+            humanize_filter(&fdx, &fdy);
+        }
+        CHECK(labs(delivered - 200) <= 2, "field-clip carry: returned motion is redelivered");
+    }
+
     printf(failures ? "\n%d FAILED\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
 }

@@ -742,22 +742,20 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 __attribute__((cold, noinline))
 static void kmbox_merge_keyboard(uint8_t *report, uint8_t len);
 
-static uint32_t last_inject_ms;
+// Output cadence tracking. last_merge_ms = when a real mouse report last rode
+// through (injection rides those). last_synth_ms = last standalone synth frame.
+// Used to keep exactly one mouse report per ~1 ms: injection rides merge
+// reports while the mouse is active, and the synth path only fills in when the
+// mouse has gone silent (so the two paths never both emit in the same frame).
+static uint32_t last_merge_ms;
+static uint32_t last_synth_ms;
+#define SYNTH_SILENCE_MS 2   // mouse considered idle after this many ms of no report
 
-/* The filter must advance exactly once per ~1 ms output frame. Both the merge
- * path (per upstream report) and the synth path (per loop iteration) call this;
- * gate to one advance per millisecond so a busy loop can't over-drain the
- * filter or flood the device endpoint. When gated, no injection is added this
- * call — real-mouse passthrough still flows. */
+/* Pull this frame's injected delta from the pending accumulators and run it
+ * through the humanization filter. The filter delivers in-frame and owns
+ * conservation (sub-pixel residual + >127 cap-carry), so we just consume. */
 static void kmbox_take_injection(int16_t *out_dx, int16_t *out_dy)
 {
-	uint32_t now = millis();
-	if (now == last_inject_ms) {
-		*out_dx = 0;
-		*out_dy = 0;
-		return;
-	}
-	last_inject_ms = now;
 	int16_t dx = inject.mouse_dx;
 	int16_t dy = inject.mouse_dy;
 	inject.mouse_dx = 0;
@@ -771,6 +769,7 @@ __attribute__((section(".fastrun")))
 void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8_t len)
 {
 	if (iface_protocol == 2) {
+		last_merge_ms = millis();   // a real mouse report is riding through now
 		if (__builtin_expect(cached_mouse_report_len == 0, 0))
 			cached_mouse_report_len = len;
 
@@ -858,6 +857,12 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 				int8_t w_tlm = (mouse_layout.w_byte != 0xFF)
 				             ? (int8_t)done_w : inject.mouse_wheel;
 				proto_notify_axes((int16_t)done_dx, (int16_t)done_dy, w_tlm);
+				// If the field clamp rejected part of the injected delta (e.g.
+				// 8-bit field while the real mouse is also moving), return the
+				// unfit injected portion so the filter redelivers it next frame.
+				// Real-mouse motion keeps priority; nothing injected is dropped.
+				humanize_return((int16_t)(inj_dx - done_dx),
+				                (int16_t)(inj_dy - done_dy));
 				inject.mouse_dirty = (inject.mouse_buttons != 0 ||
 				                      inject.mouse_wheel != 0 ||
 				                      humanize_pending());
@@ -924,6 +929,10 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 	}
 
 	proto_notify_axes((int16_t)done_dx, (int16_t)done_dy, (int8_t)done_w);
+	// Return any injected motion not applied this frame — either field-clamped,
+	// or (on split X/Y report-ID layouts) belonging to an axis whose report ID
+	// didn't arrive this call. The filter redelivers it; nothing is dropped.
+	humanize_return((int16_t)(inj_dx - done_dx), (int16_t)(inj_dy - done_dy));
 	inject.mouse_dirty = (inject.mouse_buttons != 0 ||
 	                      inject.mouse_wheel != 0 ||
 	                      humanize_pending());
@@ -972,7 +981,15 @@ void kmbox_send_pending(void)
 	}
 
 	if (merged_this_cycle) return;
-	if (inject.mouse_dirty && cached_mouse_ep && mouse_layout.valid) {
+	// Only synthesize a standalone mouse report when the physical mouse has
+	// gone silent — otherwise injection rides the next real report (merge),
+	// so the two paths never both emit in the same frame (which would flood /
+	// overwrite at the 1 kHz endpoint). Capped to one synth per ms.
+	uint32_t ms = millis();
+	bool mouse_silent = (uint32_t)(ms - last_merge_ms) >= SYNTH_SILENCE_MS;
+	if (inject.mouse_dirty && mouse_silent && ms != last_synth_ms &&
+	    cached_mouse_ep && mouse_layout.valid) {
+		last_synth_ms = ms;
 		uint8_t synth[16];
 		memset(synth, 0, sizeof(synth));
 		uint8_t doff = mouse_layout.data_off;

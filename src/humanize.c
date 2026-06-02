@@ -10,14 +10,15 @@
 #define HZ_TIMING_FLOOR    0.80f    /* min multiple of base period */
 #define HZ_TIMING_CEIL     1.20f    /* max multiple of base period */
 
-/* Per-level presets: drain rate k (fraction of owed emitted per frame),
- * and perpendicular-noise amplitude. Level 0 = off. */
-static const float HZ_DRAIN[4] = { 1.0f, 0.55f, 0.40f, 0.30f };
-static const float HZ_NOISE[4] = { 0.0f, 0.15f, 0.35f, 0.60f };
+/* Per-level perpendicular-noise amplitude (fraction of speed → ~constant
+ * jitter angle). Level 0 = off. Injection is delivered in-frame (no cross-frame
+ * velocity smoothing): the humanization is a bounded per-frame perturbation
+ * (noise + dither + cap), so it never holds back or lags the host's motion. */
+static const float HZ_NOISE[4] = { 0.0f, 0.05f, 0.10f, 0.18f };
 
 static struct {
     uint8_t  level;
-    float    drain, noise_amp;
+    float    noise_amp;
     float    owed_x, owed_y;        /* undelivered injected motion */
     float    res_x, res_y;          /* sub-pixel residual */
     float    ewma;                  /* noise correlation alpha */
@@ -57,7 +58,6 @@ static uint32_t hw_entropy(void) {
 void humanize_set_level(uint8_t level) {
     if (level > 3) level = 3;
     S.level     = level;
-    S.drain     = HZ_DRAIN[level];
     S.noise_amp = HZ_NOISE[level];
 }
 
@@ -115,8 +115,10 @@ void humanize_filter(int16_t *dx, int16_t *dy) {
     }
     S.idle = 0;
 
-    float ex = S.owed_x * S.drain;
-    float ey = S.owed_y * S.drain;
+    /* Deliver all owed motion this frame (cap-with-carry below handles the
+     * rare >127/frame flick). No fractional drain → no latency / no smear. */
+    float ex = S.owed_x;
+    float ey = S.owed_y;
 
     float speed = sqrtf(ex*ex + ey*ey);
     S.n_perp = S.ewma * S.n_perp + (1.0f - S.ewma) * sfc32_uniform();
@@ -126,6 +128,11 @@ void humanize_filter(int16_t *dx, int16_t *dy) {
 
     *dx = drain_axis(&S.owed_x, &S.res_x, ex, nx);
     *dy = drain_axis(&S.owed_y, &S.res_y, ey, ny);
+}
+
+void humanize_return(int16_t dx, int16_t dy) {
+    S.owed_x += (float)dx;
+    S.owed_y += (float)dy;
 }
 
 bool humanize_pending(void) {
