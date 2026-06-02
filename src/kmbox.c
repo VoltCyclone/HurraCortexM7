@@ -771,13 +771,13 @@ static void kmbox_merge_keyboard(uint8_t *report, uint8_t len);
  * we zero the pending fields here. */
 static void kmbox_take_injection(int16_t *out_dx, int16_t *out_dy)
 {
-    int16_t dx = inject.mouse_dx;
-    int16_t dy = inject.mouse_dy;
-    inject.mouse_dx = 0;
-    inject.mouse_dy = 0;
-    humanize_filter(&dx, &dy);
-    *out_dx = dx;
-    *out_dy = dy;
+	int16_t dx = inject.mouse_dx;
+	int16_t dy = inject.mouse_dy;
+	inject.mouse_dx = 0;
+	inject.mouse_dy = 0;
+	humanize_filter(&dx, &dy);
+	*out_dx = dx;
+	*out_dy = dy;
 }
 
 __attribute__((section(".fastrun")))
@@ -804,6 +804,7 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 				// fires; conservation is now owned by humanize_filter's internal
 				// owed accumulator.
 				int32_t done_w = 0;
+				int32_t done_dx = 0, done_dy = 0;
 				if (mouse_layout.x_is16) {
 					int32_t rx = (int16_t)(report[mouse_layout.x_byte] |
 					             ((uint16_t)report[mouse_layout.x_byte + 1] << 8));
@@ -812,12 +813,14 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 					if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
 					report[mouse_layout.x_byte]     = (uint8_t)(mx & 0xFF);
 					report[mouse_layout.x_byte + 1] = (uint8_t)(mx >> 8);
+					done_dx = mx - rx;
 				} else {
 					int32_t rx = (int8_t)report[mouse_layout.x_byte];
 					int32_t mx = rx + inj_dx;
 					if (mx >  mouse_layout.x_max) mx =  mouse_layout.x_max;
 					if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
 					report[mouse_layout.x_byte] = (uint8_t)(int8_t)mx;
+					done_dx = mx - rx;
 				}
 
 				if (mouse_layout.y_is16) {
@@ -828,12 +831,14 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 					if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
 					report[mouse_layout.y_byte]     = (uint8_t)(my & 0xFF);
 					report[mouse_layout.y_byte + 1] = (uint8_t)(my >> 8);
+					done_dy = my - ry;
 				} else {
 					int32_t ry = (int8_t)report[mouse_layout.y_byte];
 					int32_t my = ry + inj_dy;
 					if (my >  mouse_layout.y_max) my =  mouse_layout.y_max;
 					if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
 					report[mouse_layout.y_byte] = (uint8_t)(int8_t)my;
+					done_dy = my - ry;
 				}
 
 				if (mouse_layout.w_byte != 0xFF && inject.mouse_wheel != 0) {
@@ -865,7 +870,7 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 				// pending value now to preserve its telemetry cadence.
 				int8_t w_tlm = (mouse_layout.w_byte != 0xFF)
 				             ? (int8_t)done_w : inject.mouse_wheel;
-				proto_notify_axes(inj_dx, inj_dy, w_tlm);
+				proto_notify_axes((int16_t)done_dx, (int16_t)done_dy, w_tlm);
 				inject.mouse_dirty = (inject.mouse_buttons != 0 ||
 				                      inject.mouse_wheel != 0 ||
 				                      humanize_pending());
