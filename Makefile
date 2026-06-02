@@ -77,3 +77,11 @@ clean:
 	rm -f $(OBJ) $(TARGET).elf $(TARGET).hex
 
 .PHONY: all flash clean
+
+# Host-native unit tests (no cross-compile). humanize.c must stay free of
+# hardware headers behind HUMANIZE_HOSTTEST so it builds with system gcc.
+.PHONY: test
+test:
+	cc -std=c11 -O2 -DHUMANIZE_HOSTTEST -Isrc -o /tmp/humanize_test \
+	   test/humanize_test.c src/humanize.c -lm
+	/tmp/humanize_test
