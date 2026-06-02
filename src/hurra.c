@@ -261,7 +261,7 @@ static TF_Result l_human(TinyFrame *tf, TF_Msg *msg)
 {
     (void)tf;
     track_id(msg->frame_id);
-    if (msg->len < 1) { s_payload_invalid++; return TF_STAY; }
+    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
     uint8_t lvl = msg->data[0];
     if (lvl > 3) lvl = 3;
     humanize_set_level(lvl);
