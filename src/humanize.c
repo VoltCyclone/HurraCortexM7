@@ -128,6 +128,10 @@ void humanize_filter(int16_t *dx, int16_t *dy) {
     *dy = drain_axis(&S.owed_y, &S.res_y, ey, ny);
 }
 
+bool humanize_pending(void) {
+    return fabsf(S.owed_x) >= HZ_IDLE_EPS || fabsf(S.owed_y) >= HZ_IDLE_EPS;
+}
+
 uint32_t humanize_timing_next(uint32_t base_ldval, bool *out_skip) {
     *out_skip = false;
     if (S.level == 0) return base_ldval;
