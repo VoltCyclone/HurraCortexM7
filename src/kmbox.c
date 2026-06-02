@@ -764,13 +764,22 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 __attribute__((cold, noinline))
 static void kmbox_merge_keyboard(uint8_t *report, uint8_t len);
 
-/* Pull this frame's injected delta out of the pending accumulators, run it
- * through the humanization filter, and return the humanized amount to apply.
- * Real-mouse passthrough is NOT routed here — only injected motion. The
- * filter owns the undelivered remainder (its internal owed accumulator), so
- * we zero the pending fields here. */
+static uint32_t last_inject_ms;
+
+/* The filter must advance exactly once per ~1 ms output frame. Both the merge
+ * path (per upstream report) and the synth path (per loop iteration) call this;
+ * gate to one advance per millisecond so a busy loop can't over-drain the
+ * filter or flood the device endpoint. When gated, no injection is added this
+ * call — real-mouse passthrough still flows. */
 static void kmbox_take_injection(int16_t *out_dx, int16_t *out_dy)
 {
+	uint32_t now = millis();
+	if (now == last_inject_ms) {
+		*out_dx = 0;
+		*out_dy = 0;
+		return;
+	}
+	last_inject_ms = now;
 	int16_t dx = inject.mouse_dx;
 	int16_t dy = inject.mouse_dy;
 	inject.mouse_dx = 0;

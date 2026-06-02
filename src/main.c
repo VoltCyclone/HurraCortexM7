@@ -7,7 +7,6 @@
 #include "usb_device.h"
 #include "desc_capture.h"
 #include "kmbox.h"
-#include "smooth.h"
 #include "humanize.h"
 #include "gpt_profile.h"
 #include "led.h"
@@ -189,7 +188,7 @@ int main(void)
 		pit_next_ldval = ldval;
 		PIT_LDVAL0 = ldval;
 		PIT_TCTRL0 = PIT_TCTRL_TIE | PIT_TCTRL_TEN;
-		smooth_init(interval_us);
+		humanize_init(interval_us);
 	}
 	kmbox_cache_endpoints(&desc);
 	if (!usb_device_init(&desc)) {
@@ -230,13 +229,7 @@ int main(void)
 			pit_tick_pending = false;
 			did_work = true;
 			bool skip = false;
-			uint32_t next_ldval = smooth_timing_next(pit_base_ldval, &skip);
-			pit_next_ldval = next_ldval;
-			if (!skip) {
-				int16_t sx, sy;
-				smooth_process_frame(&sx, &sy);
-				if (sx || sy) kmbox_inject_smooth(sx, sy);
-			}
+			pit_next_ldval = humanize_timing_next(pit_base_ldval, &skip);
 		}
 
 		// --- USB device EP completion (unblock EPs for next send) ---
