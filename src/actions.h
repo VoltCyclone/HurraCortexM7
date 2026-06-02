@@ -15,7 +15,7 @@ extern uint16_t g_lock_mask;
 void    act_init(void);
 int8_t  act_button_set(uint8_t mask, uint8_t action);    // action: 0=up, 1=down
 void    act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms);
-void    act_move(int16_t dx, int16_t dy, bool smooth);
+void    act_move(int16_t dx, int16_t dy);
 int8_t  act_kb_down(uint8_t key);
 void    act_kb_up(uint8_t key);
 void    act_kb_press(uint8_t key, uint32_t delay_ms);

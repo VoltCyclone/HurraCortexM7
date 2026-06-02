@@ -3,7 +3,7 @@
 // Moved off LPUART6 (pins 0/1) after suspected pad damage on D0/D1.
 
 #include "kmbox.h"
-#include "smooth.h"
+#include "humanize.h"
 #include "imxrt.h"
 #include "usb_device.h"
 #include "proto.h"
@@ -171,7 +171,7 @@ static uint8_t cached_mouse_report_len; // actual report length from first real 
 static bool merged_this_cycle;
 
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
-                               int8_t wheel, bool use_smooth);
+                               int8_t wheel);
 static void baud_change_apply(uint32_t baud);
 
 static void tx_enqueue(uint8_t b)
@@ -381,7 +381,6 @@ void kmbox_init(void)
 	// Hurra build never transmits (TF_WriteImpl no-ops on a NULL s_tx).
 	proto_init();
 	proto_set_tx(uart_tx_frame);
-	smooth_init(1000); // default 1kHz, main.c re-inits with actual rate
 }
 
 static void parse_mouse_layout(const uint8_t *rd, uint16_t rdlen)
@@ -591,6 +590,7 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 			cached_kb_ep = ep;
 		}
 	}
+
 }
 
 bool kmbox_rx_pending(void)
@@ -742,10 +742,34 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 __attribute__((cold, noinline))
 static void kmbox_merge_keyboard(uint8_t *report, uint8_t len);
 
+// Output cadence tracking. last_merge_ms = when a real mouse report last rode
+// through (injection rides those). last_synth_ms = last standalone synth frame.
+// Used to keep exactly one mouse report per ~1 ms: injection rides merge
+// reports while the mouse is active, and the synth path only fills in when the
+// mouse has gone silent (so the two paths never both emit in the same frame).
+static uint32_t last_merge_ms;
+static uint32_t last_synth_ms;
+#define SYNTH_SILENCE_MS 2   // mouse considered idle after this many ms of no report
+
+/* Pull this frame's injected delta from the pending accumulators and run it
+ * through the humanization filter. The filter delivers in-frame and owns
+ * conservation (sub-pixel residual + >127 cap-carry), so we just consume. */
+static void kmbox_take_injection(int16_t *out_dx, int16_t *out_dy)
+{
+	int16_t dx = inject.mouse_dx;
+	int16_t dy = inject.mouse_dy;
+	inject.mouse_dx = 0;
+	inject.mouse_dy = 0;
+	humanize_filter(&dx, &dy);
+	*out_dx = dx;
+	*out_dy = dy;
+}
+
 __attribute__((section(".fastrun")))
 void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8_t len)
 {
 	if (iface_protocol == 2) {
+		last_merge_ms = millis();   // a real mouse report is riding through now
 		if (__builtin_expect(cached_mouse_report_len == 0, 0))
 			cached_mouse_report_len = len;
 
@@ -757,66 +781,91 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 				report[doff] |= inject.mouse_buttons;
 				proto_notify_buttons(report[doff]);
 
+				int16_t inj_dx, inj_dy;
+				kmbox_take_injection(&inj_dx, &inj_dy);
+
+				// Each axis adds humanized injection onto the mouse's own delta
+				// and clamps to the report field as a hard safety bound only.
+				// The filter's per-frame cap (127) means the field clamp rarely
+				// fires; conservation is now owned by humanize_filter's internal
+				// owed accumulator.
+				int32_t done_w = 0;
+				int32_t done_dx = 0, done_dy = 0;
 				if (mouse_layout.x_is16) {
 					int32_t rx = (int16_t)(report[mouse_layout.x_byte] |
 					             ((uint16_t)report[mouse_layout.x_byte + 1] << 8));
-					int32_t mx = rx + inject.mouse_dx;
+					int32_t mx = rx + inj_dx;
 					if (mx >  mouse_layout.x_max) mx =  mouse_layout.x_max;
 					if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
 					report[mouse_layout.x_byte]     = (uint8_t)(mx & 0xFF);
 					report[mouse_layout.x_byte + 1] = (uint8_t)(mx >> 8);
+					done_dx = mx - rx;
 				} else {
 					int32_t rx = (int8_t)report[mouse_layout.x_byte];
-					int32_t mx = rx + inject.mouse_dx;
+					int32_t mx = rx + inj_dx;
 					if (mx >  mouse_layout.x_max) mx =  mouse_layout.x_max;
 					if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
 					report[mouse_layout.x_byte] = (uint8_t)(int8_t)mx;
+					done_dx = mx - rx;
 				}
 
 				if (mouse_layout.y_is16) {
 					int32_t ry = (int16_t)(report[mouse_layout.y_byte] |
 					             ((uint16_t)report[mouse_layout.y_byte + 1] << 8));
-					int32_t my = ry + inject.mouse_dy;
+					int32_t my = ry + inj_dy;
 					if (my >  mouse_layout.y_max) my =  mouse_layout.y_max;
 					if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
 					report[mouse_layout.y_byte]     = (uint8_t)(my & 0xFF);
 					report[mouse_layout.y_byte + 1] = (uint8_t)(my >> 8);
+					done_dy = my - ry;
 				} else {
 					int32_t ry = (int8_t)report[mouse_layout.y_byte];
-					int32_t my = ry + inject.mouse_dy;
+					int32_t my = ry + inj_dy;
 					if (my >  mouse_layout.y_max) my =  mouse_layout.y_max;
 					if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
 					report[mouse_layout.y_byte] = (uint8_t)(int8_t)my;
+					done_dy = my - ry;
 				}
 
 				if (mouse_layout.w_byte != 0xFF && inject.mouse_wheel != 0) {
 					if (mouse_layout.w_is16) {
 						int32_t rw = (int16_t)(report[mouse_layout.w_byte] |
 						             ((uint16_t)report[mouse_layout.w_byte + 1] << 8));
-						int32_t mw = rw + inject.mouse_wheel;
+						int32_t want = rw + inject.mouse_wheel;
+						int32_t mw = want;
 						if (mw >  mouse_layout.w_max) mw =  mouse_layout.w_max;
 						if (mw < -mouse_layout.w_max) mw = -mouse_layout.w_max;
 						report[mouse_layout.w_byte]     = (uint8_t)(mw & 0xFF);
 						report[mouse_layout.w_byte + 1] = (uint8_t)(mw >> 8);
+						inject.mouse_wheel = (int8_t)(want - mw);
+						done_w = mw - rw;
 					} else {
 						int32_t rw = (int8_t)report[mouse_layout.w_byte];
-						int32_t mw = rw + inject.mouse_wheel;
+						int32_t want = rw + inject.mouse_wheel;
+						int32_t mw = want;
 						if (mw >  mouse_layout.w_max) mw =  mouse_layout.w_max;
 						if (mw < -mouse_layout.w_max) mw = -mouse_layout.w_max;
 						report[mouse_layout.w_byte] = (uint8_t)(int8_t)mw;
+						inject.mouse_wheel = (int8_t)(want - mw);
+						done_w = mw - rw;
 					}
-					// Wheel zero deferred until after proto_notify_axes so the
-					// callback sees the actual scroll value, not 0.
 				}
 
-				proto_notify_axes(inject.mouse_dx, inject.mouse_dy,
-				                   inject.mouse_wheel);
-				if (mouse_layout.w_byte != 0xFF)
-					inject.mouse_wheel = 0;
-				inject.mouse_dx    = 0;
-				inject.mouse_dy    = 0;
+				// For a wheel on a separate report ID (no field here) the scroll
+				// is flushed later by kmbox_send_wheel_report, so report the full
+				// pending value now to preserve its telemetry cadence.
+				int8_t w_tlm = (mouse_layout.w_byte != 0xFF)
+				             ? (int8_t)done_w : inject.mouse_wheel;
+				proto_notify_axes((int16_t)done_dx, (int16_t)done_dy, w_tlm);
+				// If the field clamp rejected part of the injected delta (e.g.
+				// 8-bit field while the real mouse is also moving), return the
+				// unfit injected portion so the filter redelivers it next frame.
+				// Real-mouse motion keeps priority; nothing injected is dropped.
+				humanize_return((int16_t)(inj_dx - done_dx),
+				                (int16_t)(inj_dy - done_dy));
 				inject.mouse_dirty = (inject.mouse_buttons != 0 ||
-				                      inject.mouse_wheel != 0);
+				                      inject.mouse_wheel != 0 ||
+				                      humanize_pending());
 			} else {
 				kmbox_merge_report_slow(report, len, rid, doff);
 			}
@@ -832,7 +881,13 @@ __attribute__((cold, noinline))
 static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
                                     uint8_t rid, uint8_t doff)
 {
-	bool wheel_consumed = false;
+	// Pull humanized injection once for this frame; conservation is owned by
+	// the filter's internal owed accumulator.  Only the axes whose report ID
+	// actually arrived are applied — if X and Y live on different report IDs
+	// the caller re-enters with the other ID and the filter will emit again.
+	int16_t inj_dx, inj_dy;
+	kmbox_take_injection(&inj_dx, &inj_dy);
+	int32_t done_dx = 0, done_dy = 0, done_w = 0;
 
 	if (rid == mouse_layout.report_id) {
 		report[doff] |= inject.mouse_buttons;
@@ -840,20 +895,22 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 
 		int32_t rx = read_report_field(report, len, mouse_layout.x_bit,
 		                               mouse_layout.x_size, doff);
-		int32_t mx = rx + inject.mouse_dx;
+		int32_t mx = rx + inj_dx;
 		if (mx > mouse_layout.x_max) mx = mouse_layout.x_max;
 		if (mx < -mouse_layout.x_max) mx = -mouse_layout.x_max;
 		write_report_field(report, len, mouse_layout.x_bit,
 		                   mouse_layout.x_size, doff, mx);
+		done_dx = mx - rx;
 
 		if (rid == mouse_layout.y_report_id) {
 			int32_t ry = read_report_field(report, len, mouse_layout.y_bit,
 			                               mouse_layout.y_size, doff);
-			int32_t my = ry + inject.mouse_dy;
+			int32_t my = ry + inj_dy;
 			if (my > mouse_layout.y_max) my = mouse_layout.y_max;
 			if (my < -mouse_layout.y_max) my = -mouse_layout.y_max;
 			write_report_field(report, len, mouse_layout.y_bit,
 			                   mouse_layout.y_size, doff, my);
+			done_dy = my - ry;
 		}
 	}
 
@@ -861,22 +918,24 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 	    rid == mouse_layout.wheel_report_id) {
 		int32_t rw = read_report_field(report, len, mouse_layout.wheel_bit,
 		                               mouse_layout.wheel_size, doff);
-		int32_t mw = rw + inject.mouse_wheel;
+		int32_t ww = rw + inject.mouse_wheel;
+		int32_t mw = ww;
 		if (mw > mouse_layout.w_max) mw = mouse_layout.w_max;
 		if (mw < -mouse_layout.w_max) mw = -mouse_layout.w_max;
 		write_report_field(report, len, mouse_layout.wheel_bit,
 		                   mouse_layout.wheel_size, doff, mw);
-		wheel_consumed = true;
+		inject.mouse_wheel = (int8_t)(ww - mw);
+		done_w = mw - rw;
 	}
 
-	proto_notify_axes(inject.mouse_dx, inject.mouse_dy,
-	                   inject.mouse_wheel);
-	inject.mouse_dx = 0;
-	inject.mouse_dy = 0;
-	if (wheel_consumed)
-		inject.mouse_wheel = 0;
+	proto_notify_axes((int16_t)done_dx, (int16_t)done_dy, (int8_t)done_w);
+	// Return any injected motion not applied this frame — either field-clamped,
+	// or (on split X/Y report-ID layouts) belonging to an axis whose report ID
+	// didn't arrive this call. The filter redelivers it; nothing is dropped.
+	humanize_return((int16_t)(inj_dx - done_dx), (int16_t)(inj_dy - done_dy));
 	inject.mouse_dirty = (inject.mouse_buttons != 0 ||
-	                      inject.mouse_wheel != 0);
+	                      inject.mouse_wheel != 0 ||
+	                      humanize_pending());
 }
 
 __attribute__((cold, noinline))
@@ -922,14 +981,24 @@ void kmbox_send_pending(void)
 	}
 
 	if (merged_this_cycle) return;
-	if (inject.mouse_dirty && cached_mouse_ep && mouse_layout.valid) {
+	// Only synthesize a standalone mouse report when the physical mouse has
+	// gone silent — otherwise injection rides the next real report (merge),
+	// so the two paths never both emit in the same frame (which would flood /
+	// overwrite at the 1 kHz endpoint). Capped to one synth per ms.
+	uint32_t ms = millis();
+	bool mouse_silent = (uint32_t)(ms - last_merge_ms) >= SYNTH_SILENCE_MS;
+	if (inject.mouse_dirty && mouse_silent && ms != last_synth_ms &&
+	    cached_mouse_ep && mouse_layout.valid) {
+		last_synth_ms = ms;
 		uint8_t synth[16];
 		memset(synth, 0, sizeof(synth));
 		uint8_t doff = mouse_layout.data_off;
 		if (doff) synth[0] = mouse_layout.report_id;
 		synth[doff] = inject.mouse_buttons;
-		int32_t dx = inject.mouse_dx;
-		int32_t dy = inject.mouse_dy;
+		int16_t inj_dx, inj_dy;
+		kmbox_take_injection(&inj_dx, &inj_dy);
+		int32_t dx = inj_dx;
+		int32_t dy = inj_dy;
 		if (dx > mouse_layout.x_max) dx = mouse_layout.x_max;
 		if (dx < -mouse_layout.x_max) dx = -mouse_layout.x_max;
 		if (dy > mouse_layout.y_max) dy = mouse_layout.y_max;
@@ -951,10 +1020,9 @@ void kmbox_send_pending(void)
 		uint8_t rlen = cached_mouse_report_len;
 		if (rlen == 0) rlen = (cached_mouse_maxpkt < 16) ? (uint8_t)cached_mouse_maxpkt : 16;
 		usb_device_send_report(cached_mouse_ep, synth, rlen);
-		inject.mouse_dx = 0;
-		inject.mouse_dy = 0;
 		inject.mouse_wheel = 0;
-		inject.mouse_dirty = (inject.mouse_buttons != 0);
+		inject.mouse_dirty = (inject.mouse_buttons != 0 ||
+		                      humanize_pending());
 	}
 	if (__builtin_expect(inject.kb_dirty && cached_kb_ep, 0)) {
 		kmbox_send_keyboard_report();
@@ -991,13 +1059,6 @@ static void kmbox_send_keyboard_report(void)
 	static const uint8_t zeros[6] = {0};
 	inject.kb_dirty = (inject.kb_modifier != 0 ||
 	                    memcmp(inject.kb_keys, zeros, 6) != 0);
-}
-
-void kmbox_inject_smooth(int16_t dx, int16_t dy)
-{
-	inject.mouse_dx += dx;
-	inject.mouse_dy += dy;
-	inject.mouse_dirty = true;
 }
 
 static void baud_change_apply(uint32_t baud)
@@ -1047,26 +1108,19 @@ uint16_t kmbox_tx_room(void)
 
 __attribute__((section(".fastrun")))
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
-                               int8_t wheel, bool use_smooth)
+                               int8_t wheel)
 {
 	inject.mouse_buttons = buttons;
 	inject.mouse_wheel += wheel;
-
-	if (use_smooth && (dx != 0 || dy != 0)) {
-		smooth_inject(dx, dy);
-		if (buttons != 0 || wheel != 0)
-			inject.mouse_dirty = true;
-	} else {
-		inject.mouse_dx += dx;
-		inject.mouse_dy += dy;
-		inject.mouse_dirty = true;
-	}
+	inject.mouse_dx += dx;
+	inject.mouse_dy += dy;
+	inject.mouse_dirty = true;
 }
 
 void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
-                        int8_t wheel, bool use_smooth)
+                        int8_t wheel)
 {
-	apply_mouse_result(dx, dy, buttons, wheel, use_smooth);
+	apply_mouse_result(dx, dy, buttons, wheel);
 }
 
 void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6])

@@ -7,7 +7,6 @@
 #include "usb_device.h"
 #include "desc_capture.h"
 #include "kmbox.h"
-#include "smooth.h"
 #include "humanize.h"
 #include "gpt_profile.h"
 #include "led.h"
@@ -78,7 +77,7 @@ int main(void)
 	kmbox_init();
 	led_init();
 
-	// PIT0: smooth injection timer — clock/ISR now, rate set after enumeration
+	// PIT0: humanization timer — clock/ISR now, rate set after enumeration
 	CCM_CCGR1 |= CCM_CCGR1_PIT(CCM_CCGR_ON);
 	PIT_MCR = 0; // enable module, timers run in debug
 	PIT_TCTRL0 = 0; // stopped until we know the mouse poll interval
@@ -180,7 +179,7 @@ int main(void)
 			}
 			break; // use first mouse interface
 		}
-		// Clamp to [125µs, 10ms] — sane range for smooth injection
+		// Clamp to [125µs, 10ms] — sane range for humanized injection
 		if (interval_us < 125) interval_us = 125;
 		if (interval_us > 10000) interval_us = 10000;
 		uint32_t ipg_mhz = (F_CPU / 4u) / 1000000u; // IPG = ARM / 4
@@ -189,7 +188,7 @@ int main(void)
 		pit_next_ldval = ldval;
 		PIT_LDVAL0 = ldval;
 		PIT_TCTRL0 = PIT_TCTRL_TIE | PIT_TCTRL_TEN;
-		smooth_init(interval_us);
+		humanize_init(interval_us);
 	}
 	kmbox_cache_endpoints(&desc);
 	if (!usb_device_init(&desc)) {
@@ -225,18 +224,11 @@ int main(void)
 		uint32_t now = millis();
 		bool did_work = false;
 
-		// --- Latency-critical: smooth injection first ---
+		// --- Latency-critical: humanized PIT tick ---
 		if (pit_tick_pending) {
 			pit_tick_pending = false;
 			did_work = true;
-			bool skip = false;
-			uint32_t next_ldval = smooth_timing_next(pit_base_ldval, &skip);
-			pit_next_ldval = next_ldval;
-			if (!skip) {
-				int16_t sx, sy;
-				smooth_process_frame(&sx, &sy);
-				if (sx || sy) kmbox_inject_smooth(sx, sy);
-			}
+			pit_next_ldval = humanize_timing_next(pit_base_ldval);
 		}
 
 		// --- USB device EP completion (unblock EPs for next send) ---
