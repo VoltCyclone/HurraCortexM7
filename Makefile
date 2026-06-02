@@ -43,7 +43,7 @@ LDFLAGS = $(MCU_FLAGS) \
 
 CORE_SRC = core/startup.c core/bootdata.c
 SRC = src/main.c src/usb_host.c src/usb_device.c src/desc_capture.c \
-      src/kmbox.c src/humanize.c src/smooth.c src/actions.c src/led.c \
+      src/kmbox.c src/humanize.c src/actions.c src/led.c \
       $(PROTO_SRC)
 
 OBJ = $(CORE_SRC:.c=.o) $(SRC:.c=.o)
@@ -58,7 +58,7 @@ $(TARGET).hex: $(TARGET).elf
 	$(OBJCOPY) -O ihex -R .eeprom $< $@
 
 # Hot-path sources get -O2 instead of -Os
-HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o src/smooth.o \
+HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o \
           src/humanize.o src/actions.o
 ifeq ($(PROTOCOL),hurra)
   HOT_SRC += src/hurra.o src/third_party/TinyFrame/TinyFrame.o

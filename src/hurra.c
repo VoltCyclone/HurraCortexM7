@@ -208,7 +208,7 @@ static TF_Result l_mouse_move_smooth(TinyFrame *tf, TF_Msg *msg)
     (void)tf;
     track_id(msg->frame_id);
     if (msg->len != 4) { s_payload_invalid++; return TF_STAY; }
-    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), true);
+    act_move(rd_i16le(&msg->data[0]), rd_i16le(&msg->data[2]), false);
     return TF_STAY;
 }
 

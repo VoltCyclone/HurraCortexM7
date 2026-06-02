@@ -2,7 +2,6 @@
 
 #include "actions.h"
 #include "kmbox.h"
-#include "smooth.h"
 #include <string.h>
 
 extern uint32_t millis(void);
@@ -85,13 +84,13 @@ void act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms)
 
 void act_move(int16_t dx, int16_t dy, bool smooth)
 {
+	(void)smooth;
 	if (s_swap_xy)  { int16_t t = dx; dx = dy; dy = t; }
 	if (s_invert_x) dx = (int16_t)-dx;
 	if (s_invert_y) dy = (int16_t)-dy;
 	g_pos_x += dx;
 	g_pos_y += dy;
-	if (smooth) smooth_inject(dx, dy);
-	else        kmbox_inject_mouse(dx, dy, g_buttons, 0, false);
+	kmbox_inject_mouse(dx, dy, g_buttons, 0, false);
 }
 
 int8_t act_kb_down(uint8_t key)

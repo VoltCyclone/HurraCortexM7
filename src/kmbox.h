@@ -17,8 +17,6 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc);
 
 void kmbox_send_pending(void);
 
-void kmbox_inject_smooth(int16_t dx, int16_t dy);
-
 void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
                         int8_t wheel, bool use_smooth);
 void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6]);

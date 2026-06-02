@@ -26,7 +26,7 @@ Bare-metal USB proxy firmware for NXP i.MX RT1062. Man-in-the-middle USB HID dev
 - `src/hurra.c` / `src/hurra.h` — Hurra binary protocol parser (TinyFrame), default
 - `src/proto.h` — compile-time protocol selector (`proto_*` -> Hurra or Ferrum)
 - `src/ferrum.c` / `src/ferrum.h` — Ferrum ASCII parser (opt-in via `PROTOCOL=ferrum`)
-- `src/smooth.c` — Smooth motion queue, bezier, humanization, sub-pixel accumulation
+- `src/humanize.c` — Always-on humanization filter applied to every injected delta (jitter, micro-correction, sub-pixel carry); the standalone smooth/easing trajectory generator (smooth.c) was retired — humanize.c is now the single humanization path
 - `src/usb_host.c` / `src/usb_device.c` — EHCI host + device controllers
 - `src/main.c` — Main loop: poll → merge → send
 
@@ -36,4 +36,4 @@ Bare-metal USB proxy firmware for NXP i.MX RT1062. Man-in-the-middle USB HID dev
 - `make flash` — flashes via teensy_loader_cli
 - `make clean` — removes objects + artifacts
 - ARM GCC via PlatformIO toolchain
-- Hot-path files (-O2 + -ffast-math): kmbox, hurra (or ferrum), actions, smooth, usb_host, usb_device, humanize
+- Hot-path files (-O2 + -ffast-math): kmbox, hurra (or ferrum), actions, usb_host, usb_device, humanize

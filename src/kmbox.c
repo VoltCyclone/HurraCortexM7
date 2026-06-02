@@ -3,7 +3,6 @@
 // Moved off LPUART6 (pins 0/1) after suspected pad damage on D0/D1.
 
 #include "kmbox.h"
-#include "smooth.h"
 #include "humanize.h"
 #include "imxrt.h"
 #include "usb_device.h"
@@ -382,7 +381,6 @@ void kmbox_init(void)
 	// Hurra build never transmits (TF_WriteImpl no-ops on a NULL s_tx).
 	proto_init();
 	proto_set_tx(uart_tx_frame);
-	smooth_init(1000); // default 1kHz, main.c re-inits with actual rate
 }
 
 static void parse_mouse_layout(const uint8_t *rd, uint16_t rdlen)
@@ -593,26 +591,6 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 		}
 	}
 
-	// Bound the smooth layer's per-frame step to what the real mouse's report
-	// field can carry, with headroom for the user's own concurrent motion.
-	// An 8-bit-delta mouse (±127) that injects near the field max produces a
-	// saturated-field signature and collides with the user's movement in the
-	// merge; leaving ~30% headroom keeps injected motion organic and lets the
-	// merge's carry absorb the rare overflow instead of clipping it. A 16-bit
-	// mouse can move far faster, so allow a realistic fast-flick ceiling rather
-	// than throttling injected flicks down to the 8-bit default. Runs after
-	// smooth_init() (see main.c), so it overrides the default cap of 127.
-	if (mouse_layout.valid) {
-		int32_t fmax = mouse_layout.x_max;
-		if (mouse_layout.y_max < fmax) fmax = mouse_layout.y_max;
-		int16_t cap;
-		if (fmax <= 127)
-			cap = (int16_t)((fmax * 7) / 10);   // ~88 for an 8-bit field
-		else
-			cap = 400;                          // realistic fast-flick ceiling
-		if (cap < 1) cap = 1;
-		smooth_set_max_per_frame(cap);
-	}
 }
 
 bool kmbox_rx_pending(void)
@@ -1066,13 +1044,6 @@ static void kmbox_send_keyboard_report(void)
 	                    memcmp(inject.kb_keys, zeros, 6) != 0);
 }
 
-void kmbox_inject_smooth(int16_t dx, int16_t dy)
-{
-	inject.mouse_dx += dx;
-	inject.mouse_dy += dy;
-	inject.mouse_dirty = true;
-}
-
 static void baud_change_apply(uint32_t baud)
 {
 	uint32_t baud_reg = compute_baud_reg(baud);
@@ -1122,18 +1093,12 @@ __attribute__((section(".fastrun")))
 static void apply_mouse_result(int16_t dx, int16_t dy, uint8_t buttons,
                                int8_t wheel, bool use_smooth)
 {
+	(void)use_smooth;
 	inject.mouse_buttons = buttons;
 	inject.mouse_wheel += wheel;
-
-	if (use_smooth && (dx != 0 || dy != 0)) {
-		smooth_inject(dx, dy);
-		if (buttons != 0 || wheel != 0)
-			inject.mouse_dirty = true;
-	} else {
-		inject.mouse_dx += dx;
-		inject.mouse_dy += dy;
-		inject.mouse_dirty = true;
-	}
+	inject.mouse_dx += dx;
+	inject.mouse_dy += dy;
+	inject.mouse_dirty = true;
 }
 
 void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
