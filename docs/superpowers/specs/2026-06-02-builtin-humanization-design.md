@@ -135,19 +135,35 @@ velocity `v_{x,y}`, sub-pixel residual `r_{x,y}`, EWMA noise terms, RNG.
 Invariants: displacement conserved (accumulators), bounded latency (τ), idle→zero,
 no superhuman/teleport frames.
 
-## 7. Relationship to `smooth.c`
+## 7. Consolidation: one humanization module
 
-`smooth.c` stays as the **opt-in Tier-2 ballistic generator** (`MOUSE_MOVE_SMOOTH`); nothing is
-deleted. Its output feeds the merge like any injection and then passes through the always-on
-filter, so it is humanized too (filtering an eased trajectory is fine — adds jerk/noise on top).
-The merge's earlier carry + per-frame-cap fixes are partly subsumed by step 5 but stay as
-defense-in-depth. The PIT timing jitter moves out of `smooth.c` into the always-on path.
+Resolved direction: **consolidate to a single clean path; no two subsystems.**
+
+The `smooth.c` trajectory generator (32-slot queue, easing, Fitts gain, overshoot/arc) is
+**already dead on the real integration path** — the bridge maps `km.move → hurra_move` (raw
+0x10) and never calls `hurra_move_smooth` (0x11); only `examples/hello.c` does. So retiring it
+removes complexity without affecting how inputs actually arrive.
+
+Plan:
+- Fold the reusable primitives `smooth.c` already has — hardware-seeded RNG, EWMA correlated
+  noise, sub-pixel accumulation, PIT timing jitter — into the single `humanize.c` filter.
+- Retire the standalone generator (queue + easing + Fitts/overshoot/arc) and its `smooth_*`
+  trajectory API. `MOUSE_MOVE_SMOOTH` frames, if ever received, route through the normal
+  inject → filter path (i.e. become equivalent to `MOUSE_MOVE` plus the always-on filter).
+- Net result: humanization lives in exactly one module (`humanize.c`), on one path, applied to
+  every output. The merge's carry + per-frame-cap fixes are subsumed by the filter's step 5.
 
 ## 8. Control surface
 
-- On by default (it is a guarantee). A protocol command `km.human(level)` (0 = off) tunes
-  intensity / disables it — required so the load and aim tests can measure raw behaviour.
-  Wired through both the Ferrum firmware parser and the hurra-app bridge.
+- **Default-on, no user config required.** The filter initialises to a sensible level at boot
+  (`HUMANIZE_DEFAULT_LEVEL`), independent of the host — if a sender never issues a command, the
+  guarantee still holds. This is the primary requirement.
+- A minimal `km.human(level)` command, levels `0..3` (0 = off, 1 = light, 2 = default,
+  3 = strong), only tunes/disables intensity — mainly so the load and aim tests can measure raw
+  vs filtered. Keep it trivial: one integer arg mapping to a small preset table of
+  (noise amplitude, τ); no per-parameter API. Wired through the Ferrum firmware parser and the
+  hurra-app bridge. If wiring proves non-trivial, ship default-on hardcoded and defer the
+  command.
 - Per-power-cycle personality (noise amplitude, τ) seeded from the hardware UID so two
   sessions/devices are not statistically identical.
 
@@ -172,10 +188,13 @@ defense-in-depth. The PIT timing jitter moves out of `smooth.c` into the always-
   snap," not a human flick. Tier-2 is the host's / opt-in generator's job.
 - Adds ~1–2 frames latency by construction (the τ of the velocity dynamics).
 
-## 11. Decisions to confirm before planning
+## 11. Decisions (resolved)
 
-1. **Keep `smooth.c` generator as opt-in** (recommended) vs retire `MOUSE_MOVE_SMOOTH` for a
-   single-subsystem model. Recommendation: keep — it is the only Tier-2 capability and costs
-   nothing to leave in place behind the filter.
-2. **Add `km.human(level)` control now** (recommended) vs hardcode on. Recommendation: add — the
-   test tools need a way to measure raw vs filtered.
+1. **Consolidate to one module; retire the standalone `smooth.c` generator.** It is already off
+   the active integration path. Fold its primitives into `humanize.c`. (§7)
+2. **Add `km.human(level)` — minimal, default-on.** Boot default = level 2, applied at init with
+   no dependence on host config; the command only tunes/disables. Ship default-on hardcoded if
+   the command wiring is non-trivial. (§8)
+
+Overriding principle from review: **keep the code clean and simple** — one path, one module,
+small preset table, no speculative configurability.
