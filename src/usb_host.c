@@ -1,4 +1,13 @@
 // usb_host.c — EHCI host on USB2, polled completion, DMA in .dmabuffers
+//
+// CACHE NOTE: the `asm volatile("dsb")` barriers around qTD arming below are
+// sufficient WITHOUT any SCB_CleanInvalidateDCache/arm_dcache_* calls *because*
+// all .dmabuffers live in the first 64 KB of OCRAM, which core/startup.c marks
+// non-cacheable via MPU region 10. On non-cacheable Normal memory a DSB is all
+// that's needed to order descriptor writes before the controller reads them.
+// If you ever make that region cacheable, you MUST add explicit cache
+// maintenance here or DMA will read stale descriptors. (Linker ASSERT in
+// core/imxrt1062_mm.ld guards the 64 KB window.)
 
 #include <string.h>
 #include "imxrt.h"

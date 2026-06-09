@@ -29,7 +29,26 @@ typedef struct {
 
 static volatile bool pit_tick_pending;
 static volatile uint32_t pit_next_ldval; // precomputed by main loop
-static uint32_t pit_base_ldval;          // nominal reload value (set after enumeration)
+static uint32_t pit_base_ldval;          // slewed reload value (tracks measured poll rate)
+static bool pit_locked;                  // adaptive base has converged on the measured rate
+                                         // (main-loop only: set in tick handler, read by LED status)
+
+// PIT input clock = PERCLK = 24 MHz crystal oscillator on this board.
+// core/startup.c sets CCM_CSCMR1 PERCLK_CLK_SEL=1 (24 MHz XTAL) and PERCLK_PODF=/1.
+// This is independent of F_CPU/ARM/IPG — do not derive it from F_CPU.
+#define PIT_CLK_HZ 24000000u
+#define PIT_INTERVAL_US_MIN 125u
+#define PIT_INTERVAL_US_MAX 10000u
+
+// Convert a desired period in microseconds to a PIT LDVAL (counts-1).
+// 64-bit intermediate avoids overflow; interval is clamped to the sane window.
+static inline uint32_t pit_ldval_from_us(uint32_t interval_us)
+{
+	if (interval_us < PIT_INTERVAL_US_MIN) interval_us = PIT_INTERVAL_US_MIN;
+	if (interval_us > PIT_INTERVAL_US_MAX) interval_us = PIT_INTERVAL_US_MAX;
+	uint32_t counts = (uint32_t)(((uint64_t)PIT_CLK_HZ * interval_us) / 1000000u);
+	return counts ? counts - 1u : 0u;
+}
 
 static void pit0_isr(void)
 {
@@ -182,8 +201,10 @@ int main(void)
 		// Clamp to [125µs, 10ms] — sane range for humanized injection
 		if (interval_us < 125) interval_us = 125;
 		if (interval_us > 10000) interval_us = 10000;
-		uint32_t ipg_mhz = (F_CPU / 4u) / 1000000u; // IPG = ARM / 4
-		uint32_t ldval = (ipg_mhz * interval_us) - 1;
+		// PIT is clocked by PERCLK = 24 MHz OSC (core/startup.c sets
+		// PERCLK_CLK_SEL=1, PERCLK_PODF=/1) — NOT the IPG/ARM clock. Using
+		// F_CPU/4 here made every period ~8.5x too long. See PIT_CLK_HZ.
+		uint32_t ldval = pit_ldval_from_us(interval_us);
 		pit_base_ldval = ldval;
 		pit_next_ldval = ldval;
 		PIT_LDVAL0 = ldval;
@@ -228,6 +249,26 @@ int main(void)
 		if (pit_tick_pending) {
 			pit_tick_pending = false;
 			did_work = true;
+			// Adaptive feed rate: slew the base period toward the measured
+			// real poll interval (never jump — an abrupt period change is both
+			// detectable and can phase-beat the host). humanize_target_ldval
+			// returns 0 until it has a confident measurement, in which case we
+			// keep the enumerated nominal base. RM-correct: the new value is
+			// applied at the next reload via the precompute-in-ISR pattern.
+			uint32_t tgt = humanize_target_ldval(PIT_CLK_HZ);
+			if (tgt) {
+				int32_t err = (int32_t)tgt - (int32_t)pit_base_ldval;
+				int32_t step = err >> 5;           // ~3%/tick proportional slew
+				if (step == 0 && err != 0)         // guarantee final convergence:
+					step = (err > 0) ? 1 : -1;     // >>5 truncates small +err to 0
+				pit_base_ldval = (uint32_t)((int32_t)pit_base_ldval + step);
+				// Locked when the slewed base sits within ~1.5% of the measured
+				// target (|err| <= tgt/64). Drives LED feedback only.
+				int32_t aerr = err < 0 ? -err : err;
+				pit_locked = (aerr <= (int32_t)(tgt >> 6));
+			} else {
+				pit_locked = false;                // no confident measurement yet
+			}
 			pit_next_ldval = humanize_timing_next(pit_base_ldval);
 		}
 
@@ -247,6 +288,11 @@ int main(void)
 				&rpt_ptr, ep_map[m].maxpkt);
 			if (ret > 0 && rpt_ptr) {
 				did_work = true;
+				// Timestamp real mouse-report arrival (GPT2 1 MHz, single-load,
+				// atomic). This is the precise "a report just arrived" point;
+				// only the mouse interface drives the adaptive feed rate.
+				if (ep_map[m].iface_protocol == 2)
+					humanize_record_arrival(gpt_profile_us());
 				kmbox_merge_report(ep_map[m].iface_protocol,
 					rpt_ptr, ret);
 				bool sent = usb_device_send_report(
@@ -281,9 +327,14 @@ int main(void)
 			uint32_t err = kmbox_uart_overrun() + kmbox_uart_framing() +
 			               kmbox_uart_noise();
 			uint16_t centihz;
-			if (err != led_err_snapshot)      centihz = 600; // ERROR  ~6 Hz
-			else if (rx != led_rx_snapshot)   centihz = 200; // ACTIVE ~2 Hz
-			else                              centihz = 50;  // IDLE   ~0.5 Hz
+			if (err != led_err_snapshot)      centihz = 600; // ERROR    ~6 Hz
+			else if (rx != led_rx_snapshot)   centihz = 200; // ACTIVE   ~2 Hz
+			else if (pit_locked)              centihz = 100; // LOCKED   ~1 Hz
+			else                              centihz = 50;  // ACQUIRING ~0.5 Hz
+			// Idle-slot only: UART status (ERROR/ACTIVE) keeps priority. When the
+			// link is quiet, the heartbeat reports adaptive feed-rate convergence —
+			// slow (0.5 Hz) while acquiring/idle, doubling to 1 Hz once the PIT
+			// base has locked onto the measured poll rate. No UART involved.
 			led_err_snapshot = err;
 			led_rx_snapshot  = rx;
 			if (centihz != led_centihz) {
