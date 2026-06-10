@@ -6,6 +6,10 @@
 *.bak
 .DS_Store
 
+# Python bytecode (tools/)
+__pycache__/
+*.pyc
+
 # Git worktrees
 .worktrees/
 

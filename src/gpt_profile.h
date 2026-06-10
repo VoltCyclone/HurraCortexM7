@@ -16,6 +16,13 @@
 #define GPT_IPG_HZ        (F_CPU / 4u)
 // Prescaler register value = divisor-1; gives a 1 MHz counter (1 tick = 1 µs).
 #define GPT_PRESCALER_1MHZ ((GPT_IPG_HZ / 1000000u) - 1u)
+// The 1 µs tick is only exact if IPG is a whole MHz, and the compile-time
+// F_CPU only matches the real clock when set_arm_clock actually programs it:
+// its <=528 MHz fallback leaves the ROM's 396 MHz state and every IPG-derived
+// constant here (and the adaptive feed-rate that consumes these timestamps)
+// would be silently wrong. Fail the build instead.
+_Static_assert(F_CPU > 528000000u, "F_CPU <=528 MHz: set_arm_clock fallback does not program dividers; GPT2 1 us tick would be wrong");
+_Static_assert(GPT_IPG_HZ % 1000000u == 0, "IPG (F_CPU/4) must be a whole MHz for an exact 1 us GPT2 tick");
 
 static inline void gpt_profile_init(void)
 {

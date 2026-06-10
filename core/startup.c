@@ -82,13 +82,37 @@ FLASHMEM uint32_t set_arm_clock(uint32_t frequency)
 	uint32_t cbcmr = CCM_CBCMR;
 
 	if (frequency > 528000000) {
-		// Step 1: Raise core voltage
-		// 600 MHz → TRG(15) ~1.25V; 816 MHz → TRG(19) ~1.30V
+		// Step 1: Raise core voltage BEFORE raising frequency.
+		//
+		// Voltage is interpolated the same way the Teensy core's clockspeed.c
+		// does it, instead of the old hand-tuned two-point table (TRG 15/19).
+		// That table under-volted everything above 600 MHz: it gave 816 MHz
+		// only ~1275 mV where the reference curve wants ~1425 mV, and at
+		// 912 MHz it would have produced ~1275 mV against a required ~1525 mV —
+		// a brownout hang under load. Formula:
+		//   base 1250 mV at >528 MHz; above 600 MHz add 25 mV per 28 MHz step.
+		// Hard-capped at OC_MAX_VOLT_MV (1575 = silicon max, also the TRG-field
+		// ceiling) so no F_CPU can ever command an out-of-range TRG. Note NXP's
+		// *recommended* operating max is 1300 mV; steps above ~864 MHz exceed
+		// that and trade silicon lifetime for clock — intentional here.
+		// TRG encodes (mV-800)/25: 1250→18, 1425→25, 1525→29, 1575→31.
+		#define OC_VOLT_STEP_HZ   28000000u
+		#define OC_VOLT_STEP_MV   25u
+		#define OC_MAX_VOLT_MV    1575u
+		uint32_t voltage = 1250u; // >528 MHz base
+		if (frequency > 600000000u) {
+			voltage += ((frequency - 600000000u) / OC_VOLT_STEP_HZ) * OC_VOLT_STEP_MV;
+			if (voltage > OC_MAX_VOLT_MV) voltage = OC_MAX_VOLT_MV;
+		}
+		uint32_t trg = (voltage - 800u) / 25u; // DCDC_REG3 TRG target step
 		uint32_t dcdc = DCDC_REG3;
-		dcdc &= ~DCDC_REG3_TRG_MASK;
-		dcdc |= DCDC_REG3_TRG(frequency > 600000000 ? 19 : 15);
-		DCDC_REG3 = dcdc;
-		while (!(DCDC_REG0 & DCDC_REG0_STS_DC_OK)) ;
+		// Only raise here; never lower (boot path goes low→high exactly once).
+		if ((dcdc & DCDC_REG3_TRG_MASK) < DCDC_REG3_TRG(trg)) {
+			dcdc &= ~DCDC_REG3_TRG_MASK;
+			dcdc |= DCDC_REG3_TRG(trg);
+			DCDC_REG3 = dcdc;
+			while (!(DCDC_REG0 & DCDC_REG0_STS_DC_OK)) ; // wait for rail to settle
+		}
 
 		// Step 2: Switch CPU to safe clock (PERIPH_CLK2) before touching ARM PLL.
 		// Use USB1 PLL (480 MHz) / 4 = 120 MHz as safe clock.

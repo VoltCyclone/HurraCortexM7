@@ -166,7 +166,12 @@ uint32_t humanize_target_ldval(uint32_t pit_clk_hz) {
     uint32_t us = S.meas_interval_us;
     if (us < HZ_LDVAL_US_MIN) us = HZ_LDVAL_US_MIN;
     if (us > HZ_LDVAL_US_MAX) us = HZ_LDVAL_US_MAX;
-    uint32_t counts = (uint32_t)(((uint64_t)pit_clk_hz * us) / 1000000u);
+    /* This runs once per PIT tick in the main loop. pit_clk_hz (PERCLK) is an
+     * exact multiple of 1 MHz, so counts = us * (clk/1e6) in pure 32-bit math.
+     * The previous ((uint64_t)clk * us) / 1e6 form pulled __aeabi_uldivmod — a
+     * data-dependent software-loop divide — into the per-tick path. Worst case
+     * here: 10000 µs * 24 = 240000, far inside uint32_t. */
+    uint32_t counts = us * (pit_clk_hz / 1000000u);
     return counts ? counts - 1u : 0u;
 }
 
@@ -275,6 +280,7 @@ uint32_t humanize_timing_next(uint32_t base_ldval) {
     float u = (float)(S.timing_lfsr >> 8) * (1.0f / 16777216.0f) - 0.5f;
     float r = (float)base_ldval * (1.0f + HZ_TIMING_JITTER * u);
     float lo = (float)base_ldval * HZ_TIMING_FLOOR, hi = (float)base_ldval * HZ_TIMING_CEIL;
-    if (r < lo) r = lo; if (r > hi) r = hi;
+    if (r < lo) r = lo;
+    if (r > hi) r = hi;
     return (uint32_t)r;
 }

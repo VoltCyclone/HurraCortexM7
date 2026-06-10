@@ -32,3 +32,38 @@ void act_set_invert_y(bool on);
 
 bool act_get_swap_xy(void);
 void act_set_swap_xy(bool on);
+
+// ── Physical-input masking (KMBox Net `mask` / `unmask_all`) ─────────────────
+// A masked physical input is suppressed before it reaches the downstream PC,
+// while injected input on the same control still passes. Enforced in the merge
+// path (src/kmbox.c); these only manage the mask state. The mouse-button/axis
+// bits reuse the lock-bit order (ml=0,mr=1,mm=2,ms1=3,ms2=4,mx=5,my=6) but in a
+// dedicated bitmap so they do not collide with g_lock_mask's injection gating.
+#define PHYS_MASK_ML    0
+#define PHYS_MASK_MR    1
+#define PHYS_MASK_MM    2
+#define PHYS_MASK_MS1   3
+#define PHYS_MASK_MS2   4
+#define PHYS_MASK_MX    5
+#define PHYS_MASK_MY    6
+#define PHYS_MASK_WHEEL 7
+extern uint16_t g_phys_mask;            // bit i set → suppress physical input i
+
+void act_phys_mask_mouse(uint8_t code, bool enable);  // code 0..7 (see above)
+void act_phys_mask_key(uint8_t hid_key, bool enable);
+void act_phys_unmask_all(void);
+bool act_phys_key_masked(uint8_t hid_key);            // queried in merge path
+bool act_phys_kb_mask_active(void);                   // any key currently masked
+
+// ── Motion program (KMBox Net `mouse_move_auto` / `mouse_move_beizer`) ───────
+// A time-bounded source of injected delta: each tick emits the increment needed
+// to reach the trajectory's position at the current time, through act_move (so
+// inverts/swap and humanization apply exactly as for manual moves). Position-
+// based, so call cadence affects granularity only, never the total or endpoint.
+// Last-writer-wins: starting a new program or any plain act_move cancels the
+// in-flight one (matching a user redirecting the mouse mid-gesture).
+void act_motion_move_dur(int16_t dx, int16_t dy, uint16_t dur_ms);
+void act_motion_bezier(int16_t dx, int16_t dy, uint16_t dur_ms,
+                       int16_t x1, int16_t y1, int16_t x2, int16_t y2);
+void act_motion_tick(void);             // step from the poll loop
+void act_motion_cancel(void);           // abort in-flight program

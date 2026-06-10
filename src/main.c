@@ -40,13 +40,22 @@ static bool pit_locked;                  // adaptive base has converged on the m
 #define PIT_INTERVAL_US_MIN 125u
 #define PIT_INTERVAL_US_MAX 10000u
 
+// Overclock thermal guard (see status-tick in main). Trip high, clear low for
+// hysteresis. The i.MX RT1062 junction is rated to 105°C; we warn well under
+// it since the overclock already runs the core hot. Detection only — we never
+// re-clock live (would corrupt F_CPU-derived timebases). Adjust for airflow.
+#define OVERTEMP_TRIP_C   85
+#define OVERTEMP_CLEAR_C  73
+
 // Convert a desired period in microseconds to a PIT LDVAL (counts-1).
-// 64-bit intermediate avoids overflow; interval is clamped to the sane window.
+// PIT_CLK_HZ is an exact multiple of 1 MHz, so counts = us * (clk/1e6) with
+// pure 32-bit arithmetic — no __aeabi_uldivmod. Max 10000 µs * 24 = 240000.
+_Static_assert(PIT_CLK_HZ % 1000000u == 0, "PIT clock must be a whole MHz");
 static inline uint32_t pit_ldval_from_us(uint32_t interval_us)
 {
 	if (interval_us < PIT_INTERVAL_US_MIN) interval_us = PIT_INTERVAL_US_MIN;
 	if (interval_us > PIT_INTERVAL_US_MAX) interval_us = PIT_INTERVAL_US_MAX;
-	uint32_t counts = (uint32_t)(((uint64_t)PIT_CLK_HZ * interval_us) / 1000000u);
+	uint32_t counts = interval_us * (PIT_CLK_HZ / 1000000u);
 	return counts ? counts - 1u : 0u;
 }
 
@@ -55,6 +64,10 @@ static void pit0_isr(void)
 	PIT_TFLG0 = PIT_TFLG_TIF;
 	PIT_LDVAL0 = pit_next_ldval; // precomputed, no FPU in ISR
 	pit_tick_pending = true;
+	// The TFLG W1C is a posted write; without a DSB the NVIC can still see
+	// the IRQ asserted at exception return and immediately re-enter — a
+	// spurious double tick (timing jitter on the injection cadence).
+	__asm volatile("dsb" ::: "memory");
 }
 
 // Static to keep off the stack (~3.6KB struct)
@@ -240,6 +253,7 @@ int main(void)
 	uint32_t led_rx_snapshot = 0;
 	uint32_t led_err_snapshot = 0;
 	uint16_t led_centihz = 0;
+	bool overtemp = false;          // sticky once tripped until temp recovers
 
 	while (1) {
 		uint32_t now = millis();
@@ -323,11 +337,23 @@ int main(void)
 		// (glitch-free) when the state actually changes.
 		if ((now - led_status_tick) >= 100) {
 			led_status_tick = now;
+			// Thermal guard for the overclock. The die sensor updates ~2 Hz
+			// (tempmon_init). We do NOT dynamically downclock: F_CPU is baked
+			// into the GPT2 µs tick, LED scale, and PIT math, and re-clocking
+			// live would corrupt those timebases and can glitch USB mid-frame.
+			// Instead we surface heat — a fast distinct LED pattern + telemetry
+			// — so it is visible before damage accrues. ~12°C hysteresis stops
+			// the heartbeat flapping at the threshold. Tune for your airflow.
+			int8_t tc = tempmon_read();
+			if (!overtemp && tc >= OVERTEMP_TRIP_C)      overtemp = true;
+			else if (overtemp && tc <= OVERTEMP_CLEAR_C) overtemp = false;
+
 			uint32_t rx  = kmbox_rx_byte_count();
 			uint32_t err = kmbox_uart_overrun() + kmbox_uart_framing() +
 			               kmbox_uart_noise();
 			uint16_t centihz;
-			if (err != led_err_snapshot)      centihz = 600; // ERROR    ~6 Hz
+			if (overtemp)                     centihz = 1200; // OVERTEMP ~12 Hz (highest priority)
+			else if (err != led_err_snapshot) centihz = 600; // ERROR    ~6 Hz
 			else if (rx != led_rx_snapshot)   centihz = 200; // ACTIVE   ~2 Hz
 			else if (pit_locked)              centihz = 100; // LOCKED   ~1 Hz
 			else                              centihz = 50;  // ACQUIRING ~0.5 Hz

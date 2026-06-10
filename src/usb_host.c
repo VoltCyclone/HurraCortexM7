@@ -73,6 +73,7 @@ set_qtd_buffers_medium(volatile uint32_t *b, const void *buf)
 static void usb2_isr(void)
 {
 	USB2_USBSTS = USB2_USBSTS; // W1C all pending status bits
+	__asm volatile("dsb" ::: "memory"); // flush W1C before exception return
 }
 
 static inline void host_power_on(void)

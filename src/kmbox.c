@@ -7,6 +7,7 @@
 #include "imxrt.h"
 #include "usb_device.h"
 #include "proto.h"
+#include "actions.h"
 #include <string.h>
 
 extern uint32_t millis(void);
@@ -74,6 +75,10 @@ static uint32_t last_rx_activity_time;
 static void km_rx_dma_isr(void)
 {
 	DMA_CINT = KM_RX_CH;
+	// Posted-write flush: without this the W1C may not have landed by
+	// exception return and the ISR re-enters once (wasted cycles in the
+	// latency-critical window between PIT ticks).
+	__asm volatile("dsb" ::: "memory");
 }
 
 // LPUART IDLE-line ISR — fires after one idle character at the end of each
@@ -84,6 +89,7 @@ static void km_rx_dma_isr(void)
 static void km_uart_idle_isr(void)
 {
 	KM_UART_STAT = LPUART_STAT_IDLE;
+	__asm volatile("dsb" ::: "memory"); // flush W1C before exception return
 }
 
 // Ring sized to match CH343B's 1 KB USB IN buffer so a full burst lands in
@@ -643,6 +649,11 @@ void kmbox_poll_fast(void)
 	// Drive catch_xy deadline check even when no UART RX is arriving.
 	proto_tick();
 
+	// Step any in-flight motion program (automove/bezier). Emits the increment
+	// toward the trajectory's position at this instant through the injection
+	// path, so it composes with real-mouse passthrough and humanization.
+	act_motion_tick();
+
 	if (__builtin_expect(inject.click_release_at != 0, 0) && millis() >= inject.click_release_at) {
 		inject.mouse_buttons &= ~inject.click_release_mask;
 		inject.mouse_dirty = true;
@@ -741,6 +752,10 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
                                     uint8_t rid, uint8_t doff);
 __attribute__((cold, noinline))
 static void kmbox_merge_keyboard(uint8_t *report, uint8_t len);
+__attribute__((cold, noinline))
+static void kmbox_phys_mouse(uint8_t *report, uint8_t len);
+__attribute__((cold, noinline))
+static void kmbox_phys_keyboard(uint8_t *report, uint8_t len);
 
 // Output cadence tracking. last_merge_ms = when a real mouse report last rode
 // through (injection rides those). last_synth_ms = last standalone synth frame.
@@ -772,6 +787,13 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 		last_merge_ms = millis();   // a real mouse report is riding through now
 		if (__builtin_expect(cached_mouse_report_len == 0, 0))
 			cached_mouse_report_len = len;
+
+		// Feature B/C: emit physical-only telemetry (pre-merge, pre-mask) and
+		// suppress masked physical inputs — before any injection is merged in.
+		// Both off (the common case) → the predicate is false and we skip it.
+		if (__builtin_expect((g_phys_mask || proto_phys_enabled()) &&
+		                     mouse_layout.valid, 0))
+			kmbox_phys_mouse(report, len);
 
 		if (mouse_layout.valid && inject.mouse_dirty) {
 			uint8_t doff = mouse_layout.data_off;
@@ -871,9 +893,17 @@ void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8
 			}
 		}
 		merged_this_cycle = true;
-	} else if (__builtin_expect(iface_protocol == 1 && inject.kb_dirty, 0)) {
-		kmbox_merge_keyboard(report, len);
-		merged_this_cycle = true;
+	} else if (iface_protocol == 1) {
+		// Feature B/C (keyboard): telemetry + masking run even with nothing
+		// injected (the user may be typing on a masked key). Gated so an idle
+		// keyboard with no monitoring/mask pays only this branch test.
+		if (__builtin_expect((proto_phys_enabled() || act_phys_kb_mask_active()) &&
+		                     len >= 8, 0))
+			kmbox_phys_keyboard(report, len);
+		if (__builtin_expect(inject.kb_dirty, 0)) {
+			kmbox_merge_keyboard(report, len);
+			merged_this_cycle = true;
+		}
 	}
 }
 
@@ -962,6 +992,80 @@ static void kmbox_merge_keyboard(uint8_t *report, uint8_t len)
 		}
 	}
 	proto_notify_keys(&report[2]);
+}
+
+// Feature B/C (mouse): runs before injection is merged. Reads the physical
+// report fields, pushes them as TLM_PHYS_* telemetry (the user's TRUE input,
+// observed before masking), then zeroes any masked physical contribution so it
+// never reaches the downstream PC. Injected input is applied afterward by the
+// normal merge, so an injected click on a masked button still passes.
+// Only the fields whose report ID matches this report are touched.
+__attribute__((cold, noinline))
+static void kmbox_phys_mouse(uint8_t *report, uint8_t len)
+{
+	uint8_t doff = mouse_layout.data_off;
+	uint8_t rid  = doff ? report[0] : 0;
+
+	bool xy_here    = (rid == mouse_layout.report_id);
+	bool wheel_here = (mouse_layout.wheel_bit != 0xFFFF &&
+	                   rid == mouse_layout.wheel_report_id);
+
+	uint8_t phys_btn = xy_here ? report[doff] : 0;
+	int32_t phys_x = 0, phys_y = 0, phys_w = 0;
+	if (xy_here) {
+		phys_x = read_report_field(report, len, mouse_layout.x_bit,
+		                           mouse_layout.x_size, doff);
+		phys_y = read_report_field(report, len, mouse_layout.y_bit,
+		                           mouse_layout.y_size, doff);
+	}
+	if (wheel_here)
+		phys_w = read_report_field(report, len, mouse_layout.wheel_bit,
+		                           mouse_layout.wheel_size, doff);
+
+	// Telemetry: the true physical input, BEFORE masking (spec §5.3).
+	if (proto_phys_enabled()) {
+		if (xy_here)
+			proto_notify_phys_buttons(phys_btn);
+		if (xy_here || wheel_here)
+			proto_notify_phys_axes((int16_t)phys_x, (int16_t)phys_y,
+			                       (int8_t)phys_w);
+	}
+
+	// Masking: zero the masked physical contributions in the outgoing report.
+	if (g_phys_mask) {
+		if (xy_here) {
+			uint8_t bmask = (uint8_t)(g_phys_mask & 0x1F); // ml,mr,mm,ms1,ms2
+			if (bmask) report[doff] &= (uint8_t)~bmask;
+			if (g_phys_mask & (1u << PHYS_MASK_MX))
+				write_report_field(report, len, mouse_layout.x_bit,
+				                   mouse_layout.x_size, doff, 0);
+			if (g_phys_mask & (1u << PHYS_MASK_MY))
+				write_report_field(report, len, mouse_layout.y_bit,
+				                   mouse_layout.y_size, doff, 0);
+		}
+		if (wheel_here && (g_phys_mask & (1u << PHYS_MASK_WHEEL)))
+			write_report_field(report, len, mouse_layout.wheel_bit,
+			                   mouse_layout.wheel_size, doff, 0);
+	}
+}
+
+// Feature B/C (keyboard): standard 8-byte boot report (modifier, reserved,
+// 6 keycodes). Pushes the physical modifier+keys as TLM_PHYS_KB (pre-mask),
+// then removes any masked keycodes from the outgoing report. Modifiers are not
+// individually maskable in the KMBox API, so only keycodes are filtered.
+__attribute__((cold, noinline))
+static void kmbox_phys_keyboard(uint8_t *report, uint8_t len)
+{
+	(void)len;  // caller guarantees len >= 8
+	if (proto_phys_enabled())
+		proto_notify_phys_keys(report[0], &report[2]);
+
+	if (act_phys_kb_mask_active()) {
+		for (int j = 2; j < 8; j++) {
+			if (report[j] && act_phys_key_masked(report[j]))
+				report[j] = 0;
+		}
+	}
 }
 
 __attribute__((cold, noinline))
