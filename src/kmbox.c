@@ -767,7 +767,22 @@ static void kmbox_phys_keyboard(uint8_t *report, uint8_t len);
 // mouse has gone silent, at the same rate the merge path was running — not a
 // fixed 1 kHz. The two paths never both emit in the same window.
 static uint32_t last_merge_us;
-static uint32_t last_synth_us;
+
+// --- Part C: lock-free synth frame handoff (main builds, PIT ISR emits) ----
+// Main loop builds the next synth report into the inactive buffer, then flips
+// synth_pub_idx with a single aligned store (atomic publish). The ISR reads the
+// published buffer and emits it — no FPU, no humanize filter, in interrupt
+// context. All cross-context scalars are volatile: written in one context, read
+// in the other, and the compiler must not cache or reorder them.
+static uint8_t           synth_buf[2][16];
+static volatile uint8_t  synth_buf_len[2];
+static volatile uint8_t  synth_wheel_pending[2]; // 1 = published frame carries the wheel
+static volatile uint8_t  synth_pub_idx;   // buffer the ISR should read
+static volatile bool     synth_armed;     // a fresh frame is waiting to emit
+// last_synth_us is WRITTEN by the ISR (kmbox_emit_synth_isr) and READ by the
+// main builder, so it must be volatile (uint32 access is atomic on M7, but the
+// compiler would otherwise cache the main-loop read across iterations).
+static volatile uint32_t last_synth_us;
 
 /* Pull this frame's injected delta from the pending accumulators and run it
  * through the humanization filter. The filter delivers in-frame and owns
@@ -1075,6 +1090,89 @@ __attribute__((cold, noinline))
 static void kmbox_send_wheel_report(void);
 __attribute__((cold, noinline))
 static void kmbox_send_keyboard_report(void);
+
+// Build the next standalone synth report into the inactive buffer and publish
+// it for the PIT ISR. Runs in the main loop (FPU + inject consumption here).
+// Does NOT decide silence/cadence — that is the ISR's gate at emit time.
+__attribute__((section(".fastrun")))
+void kmbox_publish_synth(void)
+{
+	if (!(inject.mouse_dirty && cached_mouse_ep && mouse_layout.valid)) {
+		synth_armed = false;
+		return;
+	}
+	uint8_t w = synth_pub_idx ^ 1u;          // inactive buffer
+	uint8_t *synth = synth_buf[w];
+	memset(synth, 0, 16);
+	uint8_t doff = mouse_layout.data_off;
+	if (doff) synth[0] = mouse_layout.report_id;
+	synth[doff] = inject.mouse_buttons;
+
+	int16_t inj_dx, inj_dy;
+	kmbox_take_injection(&inj_dx, &inj_dy);  // humanize_filter runs here (FPU)
+	int32_t dx = inj_dx, dy = inj_dy;
+	if (dx >  mouse_layout.x_max) dx =  mouse_layout.x_max;
+	if (dx < -mouse_layout.x_max) dx = -mouse_layout.x_max;
+	if (dy >  mouse_layout.y_max) dy =  mouse_layout.y_max;
+	if (dy < -mouse_layout.y_max) dy = -mouse_layout.y_max;
+	write_report_field(synth, 16, mouse_layout.x_bit, mouse_layout.x_size, doff, dx);
+	write_report_field(synth, 16, mouse_layout.y_bit, mouse_layout.y_size, doff, dy);
+
+	// Snapshot the wheel into the buffer but DO NOT consume inject.mouse_wheel
+	// here — it must only be cleared when the report is actually emitted, else a
+	// frame that gets superseded (synth_armed re-published, or disarmed) would
+	// silently drop the wheel delta. The ISR clears it on confirmed emit.
+	synth_wheel_pending[w] = 0;
+	if (mouse_layout.wheel_bit != 0xFFFF && inject.mouse_wheel != 0 &&
+	    mouse_layout.wheel_report_id == mouse_layout.report_id) {
+		int32_t wv = inject.mouse_wheel;
+		if (wv >  mouse_layout.w_max) wv =  mouse_layout.w_max;
+		if (wv < -mouse_layout.w_max) wv = -mouse_layout.w_max;
+		write_report_field(synth, 16, mouse_layout.wheel_bit,
+		                   mouse_layout.wheel_size, doff, wv);
+		synth_wheel_pending[w] = 1;   // this published frame carries the wheel
+	}
+	uint8_t rlen = cached_mouse_report_len;
+	if (rlen == 0) rlen = (cached_mouse_maxpkt < 16) ? (uint8_t)cached_mouse_maxpkt : 16;
+	synth_buf_len[w] = rlen;
+
+	// dirty recompute mirrors the original synth block, but keep mouse_wheel in
+	// the predicate since we have NOT consumed it yet — a pending wheel must keep
+	// the path dirty so a later emit still flushes it.
+	inject.mouse_dirty = (inject.mouse_buttons != 0 ||
+	                      inject.mouse_wheel != 0 ||
+	                      humanize_pending());
+
+	synth_pub_idx = w;        // publish the index for this buffer
+	__asm volatile("dsb" ::: "memory"); // commit buffer + index before arming
+	synth_armed = true;       // arm last: ISR keys off this (see emit barrier)
+}
+
+// Emit the published synth frame from the PIT ISR if the mouse is silent and a
+// frame is due. Returns true if it emitted. Pure consumer: no FPU and no
+// humanize filter (the only inject write is a single-store wheel clear on
+// confirmed emit). last_merge_us / measured interval are owned by the main loop.
+__attribute__((section(".fastrun")))
+bool kmbox_emit_synth_isr(uint32_t now_us)
+{
+	if (!synth_armed) return false;
+	// Consumer-side barrier: pair with the publisher's DSB. Without it the M7's
+	// out-of-order load unit may hoist the synth_pub_idx / synth_buf reads above
+	// the synth_armed check and observe a stale index or half-built buffer.
+	__asm volatile("dmb" ::: "memory");
+	uint32_t measured_us = humanize_measured_interval_us();
+	if (!synth_mouse_silent(now_us, last_merge_us, measured_us)) return false;
+	if (!synth_due(now_us, last_synth_us, measured_us)) return false;
+	uint8_t idx = synth_pub_idx;
+	usb_device_send_report(cached_mouse_ep, synth_buf[idx], synth_buf_len[idx]);
+	last_synth_us = now_us;
+	// Consume the wheel ONLY now that the frame is actually on the wire (the
+	// buffer for `idx` carried it). Deferring the clear to here is what prevents
+	// a superseded/disarmed publish from dropping a wheel delta.
+	if (synth_wheel_pending[idx]) inject.mouse_wheel = 0;
+	synth_armed = false;
+	return true;
+}
 
 __attribute__((section(".fastrun")))
 void kmbox_send_pending(void)

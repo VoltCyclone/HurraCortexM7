@@ -17,6 +17,11 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc);
 
 void kmbox_send_pending(void);
 
+// Part C: PIT-driven synth emission. publish builds the next frame (main loop,
+// FPU); emit_isr fires it from the PIT ISR. now_us is gpt_profile_us().
+void kmbox_publish_synth(void);
+bool kmbox_emit_synth_isr(uint32_t now_us);
+
 void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
                         int8_t wheel);
 void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6]);
