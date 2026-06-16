@@ -26,7 +26,16 @@ else
   $(error PROTOCOL must be 'hurra' or 'ferrum')
 endif
 
-DEFINES = -DARDUINO_TEENSY_MICROMOD -D__IMXRT1062__ -DF_CPU=816000000 \
+# F_CPU: core clock. 600 MHz is the part's rated max; this board runs
+# overclocked. 912 MHz needs ~1525 mV core (set_arm_clock interpolates it,
+# capped at the 1575 mV silicon max). IPG = F_CPU/4 = 228 MHz stays a whole
+# MHz so the GPT2 1 µs tick and LED scale (both F_CPU-derived) remain exact.
+# Above ~864 MHz exceeds NXP's 1300 mV recommended limit — trades silicon
+# lifetime for clock. Drop to 816000000 to back off. The tempmon monitor
+# (main.c) flags overtemp via LED/telemetry but does NOT downclock — it warns,
+# it does not protect; manage cooling accordingly.
+F_CPU ?= 912000000
+DEFINES = -DARDUINO_TEENSY_MICROMOD -D__IMXRT1062__ -DF_CPU=$(F_CPU) \
           -DCMD_BAUD=$(CMD_BAUD) $(PROTO_DEF)
 
 CFLAGS = $(MCU_FLAGS) $(DEFINES) \
@@ -57,8 +66,9 @@ $(TARGET).elf: $(OBJ)
 $(TARGET).hex: $(TARGET).elf
 	$(OBJCOPY) -O ihex -R .eeprom $< $@
 
-# Hot-path sources get -O2 instead of -Os
-HOT_SRC = src/usb_host.o src/usb_device.o src/kmbox.o \
+# Hot-path sources get -O2 instead of -Os. main.c is included because the
+# central poll loop (PIT tick dispatch, EP polling, merge/send) lives there.
+HOT_SRC = src/main.o src/usb_host.o src/usb_device.o src/kmbox.o \
           src/humanize.o src/actions.o
 ifeq ($(PROTOCOL),hurra)
   HOT_SRC += src/hurra.o src/third_party/TinyFrame/TinyFrame.o
@@ -85,3 +95,8 @@ test:
 	cc -std=c11 -O2 -DHUMANIZE_HOSTTEST -Isrc -o /tmp/humanize_test \
 	   test/humanize_test.c src/humanize.c -lm
 	/tmp/humanize_test
+	cc -std=c11 -O2 -Isrc -o /tmp/motion_test \
+	   test/motion_test.c src/actions.c -lm
+	/tmp/motion_test
+	cc -std=c11 -O2 -Isrc -o /tmp/synth_cadence_test test/synth_cadence_test.c
+	/tmp/synth_cadence_test

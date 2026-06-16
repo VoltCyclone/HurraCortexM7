@@ -2,6 +2,15 @@
 #include <string.h>
 #include <math.h>
 
+/* Pin the per-tick hot path to ITCM (.fastrun) for deterministic, cache-miss-free
+ * latency. Today the compiler already places these in ITCM by default, but making
+ * it explicit locks that in against future LTO/flag changes. No-op on host tests. */
+#ifdef HUMANIZE_HOSTTEST
+#define HZ_FASTRUN
+#else
+#define HZ_FASTRUN __attribute__((section(".fastrun")))
+#endif
+
 /* ── tunables ───────────────────────────────────────────────────────── */
 #define HZ_DEFAULT_LEVEL   2        /* boot default: on, "normal" */
 #define HZ_MAX_PER_FRAME   127      /* human per-frame ceiling (counts) */
@@ -9,6 +18,33 @@
 #define HZ_TIMING_JITTER   0.12f    /* +/- fraction of base period to jitter */
 #define HZ_TIMING_FLOOR    0.80f    /* min multiple of base period */
 #define HZ_TIMING_CEIL     1.20f    /* max multiple of base period */
+
+/* ── adaptive feed-rate / measured-interval tunables ───────────────────
+ * We measure the *delivery* interval of real mouse reports (GPT2 µs). This is
+ * dominated by host/EHCI quantization (125 µs microframe / 1 ms FS frame) + our
+ * poll latency, NOT the mouse's true internal cadence — it is the same signal a
+ * poll-rate tester averages, just un-averaged. We EWMA it and reject outliers. */
+#define HZ_MEAS_EWMA_SHIFT 4        /* alpha = 1/16 (>>4) on the measured interval */
+#define HZ_MEAS_MIN_COUNT  5        /* reports required before target is trusted */
+#define HZ_MEAS_DROP_MULT  4u       /* dt > this*target → dropout (reset baseline) */
+#define HZ_MEAS_BURST_DIV  2u       /* dt < target/this → burst/retry (ignore) */
+#define HZ_LDVAL_US_MIN    125u     /* must match main.c PIT clamp window */
+#define HZ_LDVAL_US_MAX    10000u
+
+/* ── per-axis normalized-speed envelope (peak-with-decay) ──────────────
+ * MAKD's "max X_Y": track a per-axis rolling peak of speed (counts/sec, which is
+ * DPI-independent given the measured interval) and normalize current speed to it.
+ * Decay is TIME-based (per measured dt), not per-frame, so it does not leak 8x
+ * faster on an 8 kHz mouse than a 1 kHz one. Attack is instantaneous.
+ * HZ_ADAPTIVE_NOISE gates whether the envelope actually drives the noise term;
+ * default 0 preserves the exact current (raw-speed) behavior so host tests and
+ * shipping feel are unchanged until this is A/B'd on hardware. The envelope
+ * state is still maintained (cheaply) so diagnostics can observe it. */
+#ifndef HZ_ADAPTIVE_NOISE
+#define HZ_ADAPTIVE_NOISE  0
+#endif
+#define HZ_PEAK_TAU_US     200000.0f /* envelope decay time constant (~200 ms) */
+#define HZ_PEAK_FLOOR      1.0f       /* min peak (counts/sec) → no div-by-zero */
 
 /* Per-level perpendicular-noise amplitude (fraction of speed → ~constant
  * jitter angle). Level 0 = off. Injection is delivered in-frame (no cross-frame
@@ -26,6 +62,12 @@ static struct {
     uint32_t a, b, c, ctr;          /* SFC32 */
     uint32_t timing_lfsr;
     int      idle;
+    /* adaptive feed-rate: measured delivery interval (GPT2 µs) */
+    uint32_t last_ts_us;            /* timestamp of previous report (0 = none) */
+    uint32_t meas_interval_us;      /* EWMA-smoothed delivery interval */
+    uint32_t arrival_count;         /* reports recorded since init */
+    /* per-axis normalized-speed envelope (counts/sec, time-decayed peak) */
+    float    peak_x, peak_y;        /* rolling per-axis speed peak */
 } S;
 
 /* ── RNG (verbatim from smooth.c) ───────────────────────────────────── */
@@ -74,9 +116,66 @@ void humanize_init(uint32_t interval_us) {
     S.ewma = 0.85f;
     humanize_set_level(HZ_DEFAULT_LEVEL);
     S.noise_amp *= 1.0f + 0.15f * sfc32_uniform();
-    (void)interval_us;  /* intentionally unused: drain rate is level-preset, not interval-scaled */
+    /* Pre-seed the measured-interval EWMA with the nominal bInterval period so
+     * outlier rejection (burst/drop) is sane from the very first real report.
+     * Without this, the first inter-report gap — which can be arbitrarily large
+     * because the device only sends on movement (NAKs when idle) — would seed a
+     * huge estimate that then rejects every normal-rate report as a "burst",
+     * permanently locking meas_interval_us at the bad value. Drain rate itself
+     * is still level-preset, not interval-scaled. */
+    if (interval_us < HZ_LDVAL_US_MIN) interval_us = HZ_LDVAL_US_MIN;
+    if (interval_us > HZ_LDVAL_US_MAX) interval_us = HZ_LDVAL_US_MAX;
+    S.meas_interval_us = interval_us;
 }
 
+/* ── adaptive feed-rate: measured delivery interval ────────────────────── */
+HZ_FASTRUN
+void humanize_record_arrival(uint32_t ts_us) {
+    if (S.arrival_count == 0) {
+        S.last_ts_us = ts_us;
+        S.arrival_count = 1;
+        return;                                  /* first report: no interval yet */
+    }
+    uint32_t dt = ts_us - S.last_ts_us;          /* unsigned, single-wrap safe */
+    uint32_t cur = S.meas_interval_us;
+    if (cur != 0) {
+        /* Reject outliers before they pollute the EWMA:
+         *  - dropout (idle gap / unplug): far longer than expected → rebase, no update
+         *  - burst / double-report / USB retry: far shorter → ignore entirely */
+        if (dt > cur * HZ_MEAS_DROP_MULT) { S.last_ts_us = ts_us; return; }
+        if (dt < cur / HZ_MEAS_BURST_DIV) { S.last_ts_us = ts_us; return; }
+    }
+    S.last_ts_us = ts_us;
+    if (cur == 0) {
+        S.meas_interval_us = dt;                 /* seed EWMA with first interval */
+    } else {
+        /* EWMA: cur += (dt - cur) * alpha, alpha = 1/2^SHIFT, integer, signed step */
+        S.meas_interval_us = (uint32_t)((int32_t)cur +
+            (((int32_t)dt - (int32_t)cur) >> HZ_MEAS_EWMA_SHIFT));
+    }
+    if (S.arrival_count < 0xFFFFFFFFu) S.arrival_count++;
+}
+
+uint32_t humanize_measured_interval_us(void) {
+    return S.meas_interval_us;
+}
+
+uint32_t humanize_target_ldval(uint32_t pit_clk_hz) {
+    if (S.arrival_count < HZ_MEAS_MIN_COUNT || S.meas_interval_us == 0)
+        return 0;                                /* not yet confident */
+    uint32_t us = S.meas_interval_us;
+    if (us < HZ_LDVAL_US_MIN) us = HZ_LDVAL_US_MIN;
+    if (us > HZ_LDVAL_US_MAX) us = HZ_LDVAL_US_MAX;
+    /* This runs once per PIT tick in the main loop. pit_clk_hz (PERCLK) is an
+     * exact multiple of 1 MHz, so counts = us * (clk/1e6) in pure 32-bit math.
+     * The previous ((uint64_t)clk * us) / 1e6 form pulled __aeabi_uldivmod — a
+     * data-dependent software-loop divide — into the per-tick path. Worst case
+     * here: 10000 µs * 24 = 240000, far inside uint32_t. */
+    uint32_t counts = us * (pit_clk_hz / 1000000u);
+    return counts ? counts - 1u : 0u;
+}
+
+HZ_FASTRUN
 static int16_t drain_axis(float *owed, float *res, float emit_v, float noise) {
     float want = emit_v + noise + *res;
     /* cap to human ceiling */
@@ -101,6 +200,7 @@ static int16_t drain_axis(float *owed, float *res, float emit_v, float noise) {
     return out;
 }
 
+HZ_FASTRUN
 void humanize_filter(int16_t *dx, int16_t *dy) {
     if (S.level == 0) return;                 /* off: passthrough */
 
@@ -121,8 +221,38 @@ void humanize_filter(int16_t *dx, int16_t *dy) {
     float ey = S.owed_y;
 
     float speed = sqrtf(ex*ex + ey*ey);
+
+    float speed_drive = speed;                 /* default: raw speed (unchanged) */
+#if HZ_ADAPTIVE_NOISE
+    /* Per-axis normalized-speed envelope (MAKD's "max X_Y"): only meaningful
+     * once we have a measured delivery interval to convert counts→counts/sec.
+     * Attack is instantaneous; decay is time-based over the measured dt so the
+     * envelope memory is wall-clock constant regardless of poll rate. Gated
+     * entirely behind HZ_ADAPTIVE_NOISE so the default build's hot path is byte
+     * -for-byte the prior raw-speed behavior and pays no expf/divide per frame. */
+    if (S.meas_interval_us > 0) {
+        float inv_dt = 1e6f / (float)S.meas_interval_us;   /* 1/sec */
+        float rate_x = fabsf(ex) * inv_dt;
+        float rate_y = fabsf(ey) * inv_dt;
+        float k = expf(-(float)S.meas_interval_us / HZ_PEAK_TAU_US); /* decay */
+        S.peak_x = (rate_x > S.peak_x) ? rate_x : S.peak_x * k;
+        S.peak_y = (rate_y > S.peak_y) ? rate_y : S.peak_y * k;
+        if (S.peak_x < HZ_PEAK_FLOOR) S.peak_x = HZ_PEAK_FLOOR;
+        if (S.peak_y < HZ_PEAK_FLOOR) S.peak_y = HZ_PEAK_FLOOR;
+        /* Drive noise off the 0..1 normalized magnitude instead of raw speed.
+         * Scaling by `speed` keeps the perpendicular jitter proportional to the
+         * actual pixel step so it stays a constant *angle*; multiplying by the
+         * normalized term shapes amplitude by how fast we are vs our own peak. */
+        float nrm_x = rate_x / S.peak_x;
+        float nrm_y = rate_y / S.peak_y;
+        float norm  = sqrtf(nrm_x*nrm_x + nrm_y*nrm_y);    /* ~0..~1.41 */
+        if (norm > 1.0f) norm = 1.0f;
+        speed_drive = speed * norm;
+    }
+#endif
+
     S.n_perp = S.ewma * S.n_perp + (1.0f - S.ewma) * sfc32_uniform();
-    float nmag = S.n_perp * S.noise_amp * speed;
+    float nmag = S.n_perp * S.noise_amp * speed_drive;
     float nx = 0.0f, ny = 0.0f;
     if (speed > 1e-3f) { nx = -ey / speed * nmag; ny = ex / speed * nmag; }
 
@@ -130,15 +260,18 @@ void humanize_filter(int16_t *dx, int16_t *dy) {
     *dy = drain_axis(&S.owed_y, &S.res_y, ey, ny);
 }
 
+HZ_FASTRUN
 void humanize_return(int16_t dx, int16_t dy) {
     S.owed_x += (float)dx;
     S.owed_y += (float)dy;
 }
 
+HZ_FASTRUN
 bool humanize_pending(void) {
     return fabsf(S.owed_x) >= HZ_IDLE_EPS || fabsf(S.owed_y) >= HZ_IDLE_EPS;
 }
 
+HZ_FASTRUN
 uint32_t humanize_timing_next(uint32_t base_ldval) {
     if (S.level == 0) return base_ldval;
     S.timing_lfsr ^= S.timing_lfsr << 13;
@@ -147,6 +280,7 @@ uint32_t humanize_timing_next(uint32_t base_ldval) {
     float u = (float)(S.timing_lfsr >> 8) * (1.0f / 16777216.0f) - 0.5f;
     float r = (float)base_ldval * (1.0f + HZ_TIMING_JITTER * u);
     float lo = (float)base_ldval * HZ_TIMING_FLOOR, hi = (float)base_ldval * HZ_TIMING_CEIL;
-    if (r < lo) r = lo; if (r > hi) r = hi;
+    if (r < lo) r = lo;
+    if (r > hi) r = hi;
     return (uint32_t)r;
 }

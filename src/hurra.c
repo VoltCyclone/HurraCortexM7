@@ -32,6 +32,8 @@ enum {
     TYPE_INVERT_Y          = 0x18,
     TYPE_SWAP_XY           = 0x19,
     TYPE_HUMAN             = 0x1A,
+    TYPE_MOUSE_MOVE_DUR    = 0x1B,   // KMBox Net automove (duration-stepped)
+    TYPE_MOUSE_MOVE_BEZIER = 0x1C,   // KMBox Net bezier move
     TYPE_BTN_LEFT          = 0x20,
     TYPE_BTN_RIGHT         = 0x21,
     TYPE_BTN_MIDDLE        = 0x22,
@@ -56,16 +58,21 @@ enum {
     TYPE_LOCK_MX  = 0x65,
     TYPE_LOCK_MY  = 0x66,
     TYPE_CATCH_XY = 0x67,
+    TYPE_PHYS_MASK = 0x68,   // KMBox Net physical-input mask / unmask_all
     // 0x70–0x73 reserved/unused (removed Hurra-only STREAM_AXIS/BTN/MOUSE/KB)
     TYPE_CB_BUTTONS   = 0x74,
     TYPE_CB_AXES      = 0x75,
     TYPE_CB_KEYS      = 0x76,
+    TYPE_CB_PHYS      = 0x77,   // KMBox Net physical-only telemetry enable
     // 0x80–0x8F on-change telemetry callbacks (Ferrum-standard)
     TYPE_TLM_AXIS    = 0x80,
     TYPE_TLM_BUTTONS = 0x81,
     // 0x82 reserved/unused (removed Hurra-only TLM_MOUSE)
     TYPE_TLM_KB      = 0x83,
     // 0x84–0x85 reserved/unused (removed Hurra-only TLM_STATS/TLM_LOG)
+    TYPE_TLM_PHYS_AXIS    = 0x86,   // physical-only mouse motion (device→host)
+    TYPE_TLM_PHYS_BUTTONS = 0x87,   // physical-only buttons (device→host)
+    TYPE_TLM_PHYS_KB      = 0x88,   // physical-only keyboard (device→host)
 };
 
 #define HURRA_IDENTITY "kmbox: Hurra v1"
@@ -99,6 +106,7 @@ static uint32_t s_baud_apply_at;
 
 // ── callback state (Ferrum-standard on-change callbacks) ────────────────────
 static uint8_t  s_cb_buttons, s_cb_axes, s_cb_keys;
+static uint8_t  s_cb_phys;   // KMBox Net physical-only telemetry enable
 static uint8_t  s_last_btn_emitted = 0;
 static uint8_t  s_last_keys_emitted[6];
 
@@ -265,6 +273,46 @@ static TF_Result l_human(TinyFrame *tf, TF_Msg *msg)
     uint8_t lvl = msg->data[0];
     if (lvl > 3) lvl = 3;
     humanize_set_level(lvl);
+    return TF_STAY;
+}
+
+// KMBox Net automove: total (dx,dy) spread over dur_ms with a human velocity
+// profile. Starts a motion program (actions.c) stepped from the poll loop;
+// oneway, no reply. dur_ms==0 falls back to an immediate move.
+static TF_Result l_mouse_move_dur(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 6) { s_payload_invalid++; return TF_STAY; }
+    int16_t  dx  = rd_i16le(&msg->data[0]);
+    int16_t  dy  = rd_i16le(&msg->data[2]);
+    uint16_t dur = rd_u16le(&msg->data[4]);
+    act_motion_move_dur(dx, dy, dur);
+    return TF_STAY;
+}
+
+// KMBox Net bezier: cubic curve from origin to (dx,dy) over dur_ms with control
+// points (x1,y1),(x2,y2) relative to start. Oneway, no reply.
+//
+// NOTE: payload is 14 bytes (7 little-endian int16 fields). The requirements doc
+// header said "12 bytes" but its own field list enumerates dx,dy,dur,x1,y1,x2,y2
+// = 14 bytes, which is what a 2-control-point cubic actually needs; 12 cannot
+// carry all 7. Implemented to the field list. Host's encoder must match (§8
+// cross-repo invariant) — confirm hurra-app sends 14, not 12.
+#define BEZIER_PAYLOAD_LEN 14
+static TF_Result l_mouse_move_bezier(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != BEZIER_PAYLOAD_LEN) { s_payload_invalid++; return TF_STAY; }
+    int16_t  dx  = rd_i16le(&msg->data[0]);
+    int16_t  dy  = rd_i16le(&msg->data[2]);
+    uint16_t dur = rd_u16le(&msg->data[4]);
+    int16_t  x1  = rd_i16le(&msg->data[6]);
+    int16_t  y1  = rd_i16le(&msg->data[8]);
+    int16_t  x2  = rd_i16le(&msg->data[10]);
+    int16_t  y2  = rd_i16le(&msg->data[12]);
+    act_motion_bezier(dx, dy, dur, x1, y1, x2, y2);
     return TF_STAY;
 }
 
@@ -491,6 +539,31 @@ static TF_Result l_catch_xy(TinyFrame *tf, TF_Msg *msg)
     return TF_STAY;
 }
 
+// KMBox Net mask / unmask_all. Payload 3 bytes: domain, code, enable.
+//   domain 0 (mouse): code 0..6 = ml,mr,mm,ms1,ms2,mx,my; 7 = wheel
+//   domain 1 (keyboard): code = HID keycode to mask/unmask
+//   domain 0xFF: clear every active mask (unmask_all); code/enable ignored
+// Oneway, no reply. Enforcement lives in the merge path (src/kmbox.c).
+static TF_Result l_phys_mask(TinyFrame *tf, TF_Msg *msg)
+{
+    (void)tf;
+    track_id(msg->frame_id);
+    if (msg->len != 3) { s_payload_invalid++; return TF_STAY; }
+    uint8_t domain = msg->data[0];
+    uint8_t code   = msg->data[1];
+    bool    enable = msg->data[2] != 0;
+    if (domain == 0xFF) {
+        act_phys_unmask_all();
+    } else if (domain == 0) {
+        act_phys_mask_mouse(code, enable);
+    } else if (domain == 1) {
+        act_phys_mask_key(code, enable);
+    } else {
+        s_payload_invalid++;
+    }
+    return TF_STAY;
+}
+
 // ── admin listeners: INIT / REBOOT / BAUD / SCREEN ──────────────────────────
 
 static TF_Result l_init(TinyFrame *tf, TF_Msg *msg)
@@ -573,6 +646,7 @@ static TF_Result cb_toggle_listener(TinyFrame *tf, TF_Msg *msg, uint8_t *flag)
 static TF_Result l_cb_btn     (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_buttons); }
 static TF_Result l_cb_axes    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_axes);    }
 static TF_Result l_cb_keys    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_keys);    }
+static TF_Result l_cb_phys    (TinyFrame *tf, TF_Msg *m) { return cb_toggle_listener(tf, m, &s_cb_phys);    }
 
 // ── telemetry emit (TLM_AXIS / TLM_BUTTONS / TLM_MOUSE / TLM_KB) ────────────
 //
@@ -606,6 +680,7 @@ void hurra_init(void)
     s_baud_pending = 0;
     s_baud_apply_at = 0;
     s_cb_buttons = s_cb_axes = s_cb_keys = 0;
+    s_cb_phys = 0;
     memset(s_last_keys_emitted, 0, sizeof(s_last_keys_emitted));
     s_screen_w = s_screen_h = 0;
     memset(&s_catch, 0, sizeof(s_catch));
@@ -618,6 +693,8 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_MO,          l_mouse_mo);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_CLICK,       l_mouse_click);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_WHEEL,       l_mouse_wheel);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_MOVE_DUR,    l_mouse_move_dur);
+    TF_AddTypeListener(&s_tf, TYPE_MOUSE_MOVE_BEZIER, l_mouse_move_bezier);
     TF_AddTypeListener(&s_tf, TYPE_MOUSE_GETPOS,      l_mouse_getpos);
     TF_AddTypeListener(&s_tf, TYPE_BTN_LEFT,   l_btn_left);
     TF_AddTypeListener(&s_tf, TYPE_BTN_RIGHT,  l_btn_right);
@@ -645,6 +722,7 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_LOCK_MX,  l_lock_mx);
     TF_AddTypeListener(&s_tf, TYPE_LOCK_MY,  l_lock_my);
     TF_AddTypeListener(&s_tf, TYPE_CATCH_XY, l_catch_xy);
+    TF_AddTypeListener(&s_tf, TYPE_PHYS_MASK, l_phys_mask);
     TF_AddTypeListener(&s_tf, TYPE_INIT,   l_init);
     TF_AddTypeListener(&s_tf, TYPE_REBOOT, l_reboot);
     TF_AddTypeListener(&s_tf, TYPE_BAUD,   l_baud);
@@ -652,6 +730,7 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_CB_BUTTONS,   l_cb_btn);
     TF_AddTypeListener(&s_tf, TYPE_CB_AXES,      l_cb_axes);
     TF_AddTypeListener(&s_tf, TYPE_CB_KEYS,      l_cb_keys);
+    TF_AddTypeListener(&s_tf, TYPE_CB_PHYS,      l_cb_phys);
 }
 
 void hurra_reset(void) { TF_ResetParser(&s_tf); }
@@ -717,4 +796,38 @@ void hurra_notify_keys(const uint8_t keys[6])
         memcpy(&p[1], keys, 6);
         tlm_send(TYPE_TLM_KB, p, sizeof(p));
     }
+}
+
+// ── physical-only telemetry (KMBox Net `monitor`) ───────────────────────────
+// Emitted by the merge path with PRE-merge (and pre-mask) physical values when
+// CB_PHYS is enabled, so a client can observe the user's true input distinctly
+// from injected/merged state. Per-report emission is acceptable (rate bounded
+// by the physical poll rate); telemetry yields to TX backpressure like TLM_*.
+bool hurra_phys_enabled(void) { return s_cb_phys != 0; }
+
+void hurra_notify_phys_axes(int16_t dx, int16_t dy, int8_t wheel)
+{
+    if (!s_cb_phys) return;
+    uint8_t p[5] = {
+        (uint8_t)dx, (uint8_t)(dx >> 8),
+        (uint8_t)dy, (uint8_t)(dy >> 8),
+        (uint8_t)wheel,
+    };
+    tlm_send(TYPE_TLM_PHYS_AXIS, p, sizeof(p));
+}
+
+void hurra_notify_phys_buttons(uint8_t buttons)
+{
+    if (!s_cb_phys) return;
+    tlm_send(TYPE_TLM_PHYS_BUTTONS, &buttons, 1);
+}
+
+void hurra_notify_phys_keys(uint8_t modifier, const uint8_t keys[6])
+{
+    if (!s_cb_phys) return;
+    uint8_t p[8];
+    p[0] = modifier;
+    p[1] = 0;                 // reserved (matches TLM_KB layout)
+    memcpy(&p[2], keys, 6);
+    tlm_send(TYPE_TLM_PHYS_KB, p, sizeof(p));
 }

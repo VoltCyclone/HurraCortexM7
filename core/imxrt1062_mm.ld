@@ -71,6 +71,14 @@ SECTIONS
 		. = ALIGN(32);
 	} > RAM
 
+	/* USB EHCI relies on .dmabuffers being non-cacheable so a bare DSB (no
+	 * cache clean/invalidate) is sufficient around qTD arming. core/startup.c
+	 * marks only the first 64 KB of OCRAM (0x20200000) non-cacheable via MPU
+	 * region 10. If .dmabuffers ever grows past 64 KB, the spillover becomes
+	 * cacheable and DMA coherency silently breaks. Fail the build instead. */
+	ASSERT(SIZEOF(.bss.dma) <= 64K,
+		"ERROR: .dmabuffers exceeds the 64 KB non-cacheable MPU window (core/startup.c region 10). Widen the MPU region or shrink DMA buffers.")
+
 	.text.csf : {
 		FILL(0xFF)
 		. = ALIGN(1024);

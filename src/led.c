@@ -22,11 +22,12 @@ extern void delay(uint32_t msec);
 // (LED_CH1_COMP+1) counts, producing the clock for CH0. CH0 toggles pin 13
 // every (COMP0+1) of those -> 50% square wave. blink_hz is inversely
 // proportional to (COMP0+1), so the RATE RATIOS between states are exact
-// regardless of the true IP-bus clock; only the absolute scale (LED_HB_K)
-// depends on it. If the measured idle blink isn't ~0.5 Hz, scale LED_HB_K by
-// the observed ratio and the active/error rates track automatically.
-#define LED_CH1_COMP    1464u         // CH1 modulo (period = COMP+1)
-#define LED_HB_K        20000u        // COMP0 = LED_HB_K/centihz - 1 (nominal IP=150MHz)
+// regardless of the true IP-bus clock; LED_HB_K sets the absolute scale and
+// is derived from the IP-bus (IPG = F_CPU/4, core/startup.c IPG_PODF=/4) so
+// the rates are true Hz at any build clock. Reference point: IPG=150 MHz
+// (600 MHz core) needs K=20000, hence the /7500 divisor.
+#define LED_CH1_COMP    1464u                  // CH1 modulo (period = COMP+1)
+#define LED_HB_K        ((F_CPU / 4u) / 7500u) // COMP0 = LED_HB_K/centihz - 1
 #define LED_CENTIHZ_MIN 5u            // clamp floor (0.05 Hz)
 
 static bool s_hb_active;
