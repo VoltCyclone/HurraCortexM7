@@ -8,6 +8,8 @@
 #include "usb_device.h"
 #include "proto.h"
 #include "actions.h"
+#include "gpt_profile.h"
+#include "synth_cadence.h"
 #include <string.h>
 
 extern uint32_t millis(void);
@@ -757,14 +759,15 @@ static void kmbox_phys_mouse(uint8_t *report, uint8_t len);
 __attribute__((cold, noinline))
 static void kmbox_phys_keyboard(uint8_t *report, uint8_t len);
 
-// Output cadence tracking. last_merge_ms = when a real mouse report last rode
-// through (injection rides those). last_synth_ms = last standalone synth frame.
-// Used to keep exactly one mouse report per ~1 ms: injection rides merge
+// Output cadence tracking (GPT2 microseconds). last_merge_us = when a real
+// mouse report last rode through (injection rides those). last_synth_us = last
+// standalone synth frame. The cadence rule (see synth_cadence.h) keeps exactly
+// one mouse report per *measured device poll interval*: injection rides merge
 // reports while the mouse is active, and the synth path only fills in when the
-// mouse has gone silent (so the two paths never both emit in the same frame).
-static uint32_t last_merge_ms;
-static uint32_t last_synth_ms;
-#define SYNTH_SILENCE_MS 2   // mouse considered idle after this many ms of no report
+// mouse has gone silent, at the same rate the merge path was running — not a
+// fixed 1 kHz. The two paths never both emit in the same window.
+static uint32_t last_merge_us;
+static uint32_t last_synth_us;
 
 /* Pull this frame's injected delta from the pending accumulators and run it
  * through the humanization filter. The filter delivers in-frame and owns
@@ -784,7 +787,7 @@ __attribute__((section(".fastrun")))
 void kmbox_merge_report(uint8_t iface_protocol, uint8_t * restrict report, uint8_t len)
 {
 	if (iface_protocol == 2) {
-		last_merge_ms = millis();   // a real mouse report is riding through now
+		last_merge_us = gpt_profile_us();   // a real mouse report is riding through now
 		if (__builtin_expect(cached_mouse_report_len == 0, 0))
 			cached_mouse_report_len = len;
 
@@ -1089,11 +1092,13 @@ void kmbox_send_pending(void)
 	// gone silent — otherwise injection rides the next real report (merge),
 	// so the two paths never both emit in the same frame (which would flood /
 	// overwrite at the 1 kHz endpoint). Capped to one synth per ms.
-	uint32_t ms = millis();
-	bool mouse_silent = (uint32_t)(ms - last_merge_ms) >= SYNTH_SILENCE_MS;
-	if (inject.mouse_dirty && mouse_silent && ms != last_synth_ms &&
+	uint32_t now_us = gpt_profile_us();
+	uint32_t measured_us = humanize_measured_interval_us();
+	bool mouse_silent = synth_mouse_silent(now_us, last_merge_us, measured_us);
+	bool due = synth_due(now_us, last_synth_us, measured_us);
+	if (inject.mouse_dirty && mouse_silent && due &&
 	    cached_mouse_ep && mouse_layout.valid) {
-		last_synth_ms = ms;
+		last_synth_us = now_us;
 		uint8_t synth[16];
 		memset(synth, 0, sizeof(synth));
 		uint8_t doff = mouse_layout.data_off;
