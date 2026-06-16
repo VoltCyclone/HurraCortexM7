@@ -31,8 +31,9 @@ endif
 # capped at the 1575 mV silicon max). IPG = F_CPU/4 = 228 MHz stays a whole
 # MHz so the GPT2 1 µs tick and LED scale (both F_CPU-derived) remain exact.
 # Above ~864 MHz exceeds NXP's 1300 mV recommended limit — trades silicon
-# lifetime for clock. Drop to 816000000 to back off; the tempmon thermal
-# throttle (main.c) guards against runaway heat at any of these.
+# lifetime for clock. Drop to 816000000 to back off. The tempmon monitor
+# (main.c) flags overtemp via LED/telemetry but does NOT downclock — it warns,
+# it does not protect; manage cooling accordingly.
 F_CPU ?= 912000000
 DEFINES = -DARDUINO_TEENSY_MICROMOD -D__IMXRT1062__ -DF_CPU=$(F_CPU) \
           -DCMD_BAUD=$(CMD_BAUD) $(PROTO_DEF)

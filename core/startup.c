@@ -96,13 +96,15 @@ FLASHMEM uint32_t set_arm_clock(uint32_t frequency)
 		// *recommended* operating max is 1300 mV; steps above ~864 MHz exceed
 		// that and trade silicon lifetime for clock — intentional here.
 		// TRG encodes (mV-800)/25: 1250→18, 1425→25, 1525→29, 1575→31.
-		#define OC_VOLT_STEP_HZ   28000000u
-		#define OC_VOLT_STEP_MV   25u
-		#define OC_MAX_VOLT_MV    1575u
+		// Local consts (not #define) so these identifiers don't leak to file
+		// scope for the rest of startup.c — they're only used in this block.
+		const uint32_t oc_volt_step_hz = 28000000u;
+		const uint32_t oc_volt_step_mv = 25u;
+		const uint32_t oc_max_volt_mv  = 1575u;
 		uint32_t voltage = 1250u; // >528 MHz base
 		if (frequency > 600000000u) {
-			voltage += ((frequency - 600000000u) / OC_VOLT_STEP_HZ) * OC_VOLT_STEP_MV;
-			if (voltage > OC_MAX_VOLT_MV) voltage = OC_MAX_VOLT_MV;
+			voltage += ((frequency - 600000000u) / oc_volt_step_hz) * oc_volt_step_mv;
+			if (voltage > oc_max_volt_mv) voltage = oc_max_volt_mv;
 		}
 		uint32_t trg = (voltage - 800u) / 25u; // DCDC_REG3 TRG target step
 		uint32_t dcdc = DCDC_REG3;

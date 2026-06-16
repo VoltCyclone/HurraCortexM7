@@ -79,7 +79,7 @@ The smoke test handshakes `km.version()`, nudges the mouse, exercises the button
 
 ```sh
 pip install pyserial pynput
-tools/ferrum_aim_test.py /dev/tty.usbserial-XXXX
+tools/ferrum_aim_test.py ~/.hurra-bridge.tty
 ```
 
 **Load test** — measures latency, throughput, and integrity of the command channel under sustained load:
@@ -103,7 +103,7 @@ make test
 ## Layout
 
 ```
-Makefile                      ARM GCC build, 816 MHz, -O2 hot path
+Makefile                      ARM GCC build, 912 MHz default (F_CPU override), -O2 hot path
 core/                         reset vector, MPU/cache setup, FlexSPI boot data
 include/imxrt.h               i.MX RT1062 register/peripheral header
 src/main.c                    poll loop: USB host → merge → USB device send
