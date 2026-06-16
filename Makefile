@@ -100,3 +100,5 @@ test:
 	cc -std=c11 -O2 -Isrc -o /tmp/synth_cadence_test \
 	   test/synth_cadence_test.c src/synth_cadence.c
 	/tmp/synth_cadence_test
+	cc -std=c11 -O2 -Isrc -o /tmp/critical_test test/critical_test.c
+	/tmp/critical_test
