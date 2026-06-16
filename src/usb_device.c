@@ -2,6 +2,7 @@
 #include "imxrt.h"
 #include "usb_device.h"
 #include "usb_host.h"
+#include "critical.h"
 
 extern uint32_t millis(void);
 extern void delay(uint32_t msec);
@@ -623,6 +624,10 @@ void usb_device_poll(void)
 		uint32_t complete = USB1_ENDPTCOMPLETE;
 		if (complete) {
 			USB1_ENDPTCOMPLETE = complete;
+			// ep_busy_mask / active_bank_mask / pending_len are also touched by
+			// the PIT ISR's synth emit (Part C). Guard the RMW so a tick landing
+			// mid-update can't clobber a bit. prime_int_ep runs inside the guard.
+			uint32_t cs = crit_enter();
 			uint8_t done = (uint8_t)(complete >> 16) & ep_busy_mask;
 			ep_busy_mask &= ~done; // clear all done EPs in one shot
 			while (done) {
@@ -635,6 +640,7 @@ void usb_device_poll(void)
 					pending_len[ep] = 0;
 				}
 			}
+			crit_exit(cs);
 		}
 	}
 
@@ -658,16 +664,25 @@ bool usb_device_send_report(uint8_t ep_num, const uint8_t *data, uint16_t len)
 	if (len > 64) len = 64;
 
 	uint8_t ep_bit = (1 << ep_num);
+	// One critical section across the whole RMW+copy+prime. The PIT ISR's synth
+	// emit also calls this function; releasing mid-body would let the ISR prime
+	// the same EP between our bank-read and our memcpy, corrupting a live DMA
+	// bank. Keep it atomic — the hold is only a few dozen cycles.
+	uint32_t cs = crit_enter();
+	bool ok;
 	if (ep_busy_mask & ep_bit) {
 		uint8_t bank = ((active_bank_mask >> ep_num) ^ 1) & 1;
 		memcpy(int_tx_buf[slot][bank], data, len);
-		pending_len[ep_num] = (uint8_t)len;
-		return true; // staged, not dropped
+		pending_len[ep_num] = (uint8_t)len; // staged, not dropped
+		ok = true;
+	} else {
+		uint8_t bank = (active_bank_mask >> ep_num) & 1;
+		memcpy(int_tx_buf[slot][bank], data, len);
+		prime_int_ep(ep_num, slot, bank, len);
+		ok = true;
 	}
-	uint8_t bank = (active_bank_mask >> ep_num) & 1;
-	memcpy(int_tx_buf[slot][bank], data, len);
-	prime_int_ep(ep_num, slot, bank, len);
-	return true;
+	crit_exit(cs);
+	return ok;
 }
 
 int usb_device_poll_out(uint8_t ep_num, uint8_t **data_ptr)
