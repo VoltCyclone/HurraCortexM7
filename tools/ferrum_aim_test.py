@@ -119,7 +119,10 @@ def send_move(ser, dx, dy):
         ser.write(line)
         return True
     except serial.SerialTimeoutException:
-        return False  # firmware/bridge backpressure — drop, next tick resends
+        # firmware/bridge backpressure — this step (dx,dy) is dropped, not
+        # retried; the next tick integrates velocity over real elapsed time and
+        # computes a fresh delta (sub-pixel remainder is carried, the step isn't)
+        return False
     except serial.SerialException:
         return False  # port closed mid-shutdown
 
