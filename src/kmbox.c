@@ -1090,8 +1090,11 @@ void kmbox_send_pending(void)
 	if (merged_this_cycle) return;
 	// Only synthesize a standalone mouse report when the physical mouse has
 	// gone silent — otherwise injection rides the next real report (merge),
-	// so the two paths never both emit in the same frame (which would flood /
-	// overwrite at the 1 kHz endpoint). Capped to one synth per ms.
+	// so the two paths never both emit in the same poll window (a double-emit
+	// would overwrite at the endpoint, since the host reads <=1 report per
+	// bInterval). Silence and cadence both derive from the *measured* device
+	// poll interval (synth_cadence.h), so on an 8 kHz mouse the synth path
+	// fills in at 8 kHz too, matching the rate the merge path was running.
 	uint32_t now_us = gpt_profile_us();
 	uint32_t measured_us = humanize_measured_interval_us();
 	bool mouse_silent = synth_mouse_silent(now_us, last_merge_us, measured_us);
