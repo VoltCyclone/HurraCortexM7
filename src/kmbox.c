@@ -766,7 +766,11 @@ static void kmbox_phys_keyboard(uint8_t *report, uint8_t len);
 // reports while the mouse is active, and the synth path only fills in when the
 // mouse has gone silent, at the same rate the merge path was running — not a
 // fixed 1 kHz. The two paths never both emit in the same window.
-static uint32_t last_merge_us;
+// last_merge_us is WRITTEN by the main merge path (kmbox_merge_report) and READ
+// by the PIT ISR (kmbox_emit_synth_isr's silence gate), so it must be volatile —
+// otherwise LTO may cache a stale value in the ISR (the ISR never writes it) and
+// the silence gate would fire early, synthing while the mouse is still active.
+static volatile uint32_t last_merge_us;
 
 // --- Part C: lock-free synth frame handoff (main builds, PIT ISR emits) ----
 // Main loop builds the next synth report into the inactive buffer, then flips
@@ -774,6 +778,11 @@ static uint32_t last_merge_us;
 // published buffer and emits it — no FPU, no humanize filter, in interrupt
 // context. All cross-context scalars are volatile: written in one context, read
 // in the other, and the compiler must not cache or reorder them.
+// synth_buf itself is intentionally NOT volatile: the producer fully writes it
+// before the publish DSB, and the ISR's "memory"-clobber DMB (after the
+// synth_armed check) forces the consumer to reload it — that barrier, not a
+// volatile qualifier, is what orders the buffer reads. Keep the DMB if you ever
+// touch this.
 static uint8_t           synth_buf[2][16];
 static volatile uint8_t  synth_buf_len[2];
 static volatile uint8_t  synth_wheel_pending[2]; // 1 = published frame carries the wheel
@@ -1097,10 +1106,28 @@ static void kmbox_send_keyboard_report(void);
 __attribute__((section(".fastrun")))
 void kmbox_publish_synth(void)
 {
-	if (!(inject.mouse_dirty && cached_mouse_ep && mouse_layout.valid)) {
-		synth_armed = false;
+	// A previously published frame is still waiting for the ISR to emit it.
+	// Don't drain injection again or overwrite the pending buffer — the ISR owns
+	// it until it emits (which disarms) or stays gated. This single guard closes
+	// two races at once: (a) the ISR catching an already-true synth_armed across
+	// a fresh index flip and emitting one frame twice; (b) re-draining inject
+	// into a second buffer before the first was sent, stranding the first drain.
+	// In steady state the ISR disarms each tick before this runs, so it never
+	// blocks; it only holds when the ISR's own gate suppressed the emit.
+	if (synth_armed) return;
+
+	// Synth only fills in while the mouse is silent — when it's active the merge
+	// path carries injection. Draining inject here during active use would steal
+	// it from the merge path, and the ISR's silence gate would then suppress the
+	// emit, losing that motion exactly when injection matters most. Gate publish
+	// on the SAME silence rule the ISR uses so the two paths never compete for
+	// inject. (synth_armed is guaranteed false past the guard above.)
+	uint32_t now_us = gpt_profile_us();
+	uint32_t measured_us = humanize_measured_interval_us();
+	if (!synth_mouse_silent(now_us, last_merge_us, measured_us)) return;
+
+	if (!(inject.mouse_dirty && cached_mouse_ep && mouse_layout.valid))
 		return;
-	}
 	uint8_t w = synth_pub_idx ^ 1u;          // inactive buffer
 	uint8_t *synth = synth_buf[w];
 	memset(synth, 0, 16);
