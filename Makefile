@@ -97,3 +97,6 @@ test:
 	cc -std=c11 -O2 -Isrc -o /tmp/motion_test \
 	   test/motion_test.c src/actions.c -lm
 	/tmp/motion_test
+	cc -std=c11 -O2 -Isrc -o /tmp/synth_cadence_test \
+	   test/synth_cadence_test.c src/synth_cadence.c
+	/tmp/synth_cadence_test
