@@ -481,9 +481,17 @@ static void intr_clear_halt_ep(uint8_t addr, uint8_t ep_num, bool in)
 // DATA0 (the device resets its toggle when the halt is cleared), and fire an
 // asynchronous CLEAR_FEATURE(ENDPOINT_HALT).  Re-priming happens later, after
 // the control transfer completes, so we never race the HC against a STALLed EP.
+//
+// Returns false (without entering the recovering state) if the async control
+// pipe is busy: we must only commit to recovery once we can actually queue the
+// CLEAR_FEATURE, otherwise the EP would latch "recovering" forever and re-prime
+// against a still-STALLed device.  The caller leaves the qTD halted and retries
+// on a later poll.
 __attribute__((cold, noinline))
-static void intr_halt_recover(uint8_t index, uint16_t len)
+static bool intr_halt_recover(uint8_t index, uint16_t len)
 {
+	if (usb_host_control_async_busy()) return false;
+
 	ehci_qh_t *qh = &qh_intr[index];
 
 	intr_halt_count[index]++;
@@ -502,6 +510,7 @@ static void intr_halt_recover(uint8_t index, uint16_t len)
 
 	// Tell the device to clear its STALL condition.
 	intr_clear_halt_ep(intr_dev_addr[index], intr_ep_num[index], true);
+	return true;
 }
 
 void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
@@ -643,7 +652,10 @@ void usb_host_interrupt_out_poll(uint8_t index)
 {
 	if (index >= MAX_INTR_OUT_EPS || !intr_out_initialized[index]) return;
 
-	// Finish a previous halt recovery.
+	// Finish a previous halt recovery.  Restore the schedule and return the slot
+	// to idle (DATA0, inactive) — do NOT re-arm a transfer here.  Re-arming an
+	// OUT qTD would re-transmit the stale buffer contents without an explicit
+	// usb_host_interrupt_out_send(); the next send() arms the next packet.
 	if (__builtin_expect(intr_out_halt_recovering[index], 0)) {
 		if (usb_host_control_async_busy()) return;
 		intr_out_halt_recovering[index] = false;
@@ -651,12 +663,9 @@ void usb_host_interrupt_out_poll(uint8_t index)
 		qh->capabilities[1] = intr_out_saved_cap1[index];
 		qh->next     = QTD_TERMINATE;
 		qh->alt_next = QTD_TERMINATE;
-		qh->token    = QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_OUT |
-			QTD_TOKEN_NBYTES(intr_out_maxpkt[index]) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-		set_qtd_buffers_small(qh->buffer, intr_out_buf[index]);
+		qh->token    = 0; // inactive, toggle cleared to DATA0
 		asm volatile("dsb" ::: "memory");
-		intr_out_transfer_active[index] = true;
-		intr_out_prime_time[index]      = millis();
+		intr_out_transfer_active[index] = false;
 		return;
 	}
 
@@ -766,7 +775,12 @@ static int intr_poll_internal(uint8_t index, uint16_t len, uint8_t **buf_out)
 	intr_transfer_active[index] = false;
 
 	if (__builtin_expect(!!(token & QTD_TOKEN_HALTED), 0)) {
-		intr_halt_recover(index, len);
+		// If the async control pipe is busy we can't queue CLEAR_FEATURE yet.
+		// Keep the slot marked active so the next poll's re-prime branch is
+		// skipped (re-priming would re-arm against a still-STALLed device); the
+		// token stays HALTED and we retry recovery on a later poll.
+		if (!intr_halt_recover(index, len))
+			intr_transfer_active[index] = true;
 		return 0;
 	}
 

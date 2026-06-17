@@ -87,6 +87,15 @@ void act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms)
 	if (mask == 0 || count == 0) return;
 
 	// Cancel any in-flight click sequence so overlapping clicks don't interleave.
+	// If the previous sequence left a button pressed, release it first so it
+	// can't stay stuck down when the new click targets a different button.
+	if (g_click_sched.button != 0 && g_click_sched.pressed) {
+		uint8_t old_mask = btn_idx_to_mask(g_click_sched.button);
+		if (old_mask && old_mask != mask) {
+			g_buttons &= ~old_mask;
+			kmbox_inject_mouse(0, 0, g_buttons, 0);
+		}
+	}
 	memset(&g_click_sched, 0, sizeof(g_click_sched));
 
 	g_buttons |= mask;
