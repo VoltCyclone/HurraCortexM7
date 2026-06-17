@@ -92,8 +92,8 @@ this firmware's `enum` in `src/hurra.c` (verified: 0x1B, 0x1C, 0x68, 0x77, and
   | `TYPE_TLM_PHYS_KB`           | `0x88` | device → host     | physical-only keyboard telemetry     |
 
 Add these to the `enum` in `src/hurra.c` (lines ~16–68) in their numeric slots,
-matching the existing block comments (Mouse 0x10–0x2F, Locks 0x60–0x6F,
-callbacks 0x70–0x7F, telemetry 0x80–0x8F).
+matching the existing block comments (Mouse 0x10–0x2F, reserved 0x60–0x6F —
+legacy lock commands removed, callbacks 0x70–0x7F, telemetry 0x80–0x8F).
 
 ---
 
@@ -162,9 +162,9 @@ int16 y2
 5. **Superseding:** a new `MOUSE_MOVE_DUR`/`BEZIER`/`MOUSE_MOVE` while a program
    is running should replace the in-flight program (last-writer-wins), matching
    how a real user redirecting the mouse overrides a prior gesture. Do not queue.
-6. **Locks/inverts still apply:** the generated motion must pass through the same
-   `act_move` transforms (`s_invert_x/y`, swap) and lock mask the normal path
-   uses, so behaviour is identical to a stream of manual moves.
+6. **Inverts/swap still apply:** the generated motion must pass through the same
+   `act_move` transforms (`s_invert_x/y`, swap) the normal path uses, so
+   behaviour is identical to a stream of manual moves.
 7. Oneway: no reply frame.
 
 ### Acceptance
@@ -268,47 +268,40 @@ let a client **block specific physical inputs** from reaching the downstream
 injected clicks. `unmask_all` clears every active mask.
 
 ### The problem in the current firmware
-The state containers exist but are **never enforced in the merge path**:
-- `g_lock_mask` (a `uint16_t` bitmap, `src/actions.c:14`) is set by the
-  `TYPE_LOCK_* 0x60–0x66` listeners (`src/hurra.c` `lock_listener`, bit order
-  `ml=0, mr=1, mm=2, ms1=3, ms2=4, mx=5, my=6`). Today it only gates **injection**,
-  not physical passthrough.
-- `g_masked_keys[]` (`src/actions.c:25`, capacity `ACT_MAX_DISABLED_KEYS=32`),
-  managed by `act_kb_mask(key, mode)` — also not consulted in the merge path.
-
-Grepping `src/kmbox.c` confirms neither `g_lock_mask` nor `g_masked_keys` is
-referenced there, so physical input is never actually suppressed.
+The `g_masked_keys[]` table (`src/actions.c`, capacity
+`ACT_MAX_DISABLED_KEYS=32`) and the `g_phys_mask` bitmap
+(`src/actions.h`/`src/actions.c`) manage masking state, but historically they
+were not consistently enforced in the merge path. The legacy `TYPE_LOCK_*`
+commands and `g_lock_mask` state have been removed entirely; physical-input
+suppression is now handled exclusively by `TYPE_PHYS_MASK`.
 
 ### New frame
 
 `TYPE_PHYS_MASK 0x68` — payload **3 bytes**:
 ```
 uint8 domain    (0 = mouse button/axis, 1 = keyboard key)
-uint8 code      (domain 0: index 0..6 matching the lock-bit order
-                          ml,mr,mm,ms1,ms2,mx,my; plus 7 = wheel
+uint8 code      (domain 0: index 0..7 matching the g_phys_mask bit order
+                          ml=0,mr=1,mm=2,ms1=3,ms2=4,mx=5,my=6,wheel=7
                  domain 1: the HID keycode to mask)
 uint8 enable    (1 = mask/suppress this input, 0 = unmask)
 ```
 
 A dedicated "unmask all" is expressed as `domain=0xFF, code=0, enable=0` (the
-firmware clears `g_lock_mask` and `g_masked_keys[]` entirely). The host maps
+firmware clears `g_phys_mask` and `g_masked_keys[]` entirely). The host maps
 `kmNet_unmask_all()` to this.
 
-> Rationale for a new frame rather than reusing `TYPE_LOCK_*`: the existing
-> `LOCK_*` bits are also used by Ferrum's lock semantics (injection gating); we do
-> not want to overload their meaning. `PHYS_MASK` is explicitly about suppressing
-> *physical passthrough*. It MAY internally reuse the `g_lock_mask` bits for the
-> mouse domain (since the bit order already matches), but the enforcement is new.
+> `PHYS_MASK` is explicitly about suppressing *physical passthrough*. It uses a
+> dedicated `g_phys_mask` bitmap for the mouse domain and `g_masked_keys[]` for
+> the keyboard domain; the legacy `TYPE_LOCK_*` commands and `g_lock_mask` state
+> have been removed.
 
 ### Firmware requirements
 1. Add `TYPE_PHYS_MASK` to the enum; register `l_phys_mask` in `hurra_init()`.
    Validate `msg->len == 3`. Update the mask state:
-   - domain 0, code 0..6 → set/clear the matching `g_lock_mask` bit (reuse the
-     existing bit order). Code 7 (wheel) → a new `g_mask_wheel` bool, or an
-     extra bit in `g_lock_mask`.
+   - domain 0, code 0..7 → set/clear the matching `g_phys_mask` bit.
    - domain 1 → `act_kb_mask(code, enable)` (already exists).
-   - domain 0xFF → clear all: `g_lock_mask = 0`, reset `g_masked_keys` via the
-     existing reset path, clear `g_mask_wheel`.
+   - domain 0xFF → clear all: `g_phys_mask = 0`, reset `g_masked_keys` via the
+     existing reset path.
 2. **Enforce in `kmbox_merge_report()`** (`src/kmbox.c`) — this is the core new
    behaviour. When building the report that goes downstream, **zero out the
    physical contribution** of any masked input *before* it is sent and before
@@ -360,7 +353,7 @@ Each feature is independently shippable; the host already degrades gracefully
 |------|--------|
 | `src/hurra.c` | Add 7 enum values; add listeners `l_mouse_move_dur`, `l_mouse_move_bezier`, `l_phys_mask`, `l_cb_phys`; register them in `hurra_init()`; add `hurra_notify_phys_*` emitters. |
 | `src/kmbox.c` | In `kmbox_merge_report()`: capture pre-merge physical fields (Feature B), enforce masks (Feature C); drive the motion-program tick (Feature A) through the injection path. |
-| `src/actions.c` / `src/actions.h` | Mask-state helpers if extending beyond `g_lock_mask`/`g_masked_keys` (e.g. `g_mask_wheel`); possibly a motion-program API. |
+| `src/actions.c` / `src/actions.h` | Mask-state helpers (`g_phys_mask`, `g_masked_keys`); motion-program API. |
 | `src/humanize.c` / `src/humanize.h` | Reuse for the `automove` velocity profile; no API change strictly required. |
 | `src/proto.h` | Add `proto_notify_phys_buttons/axes/keys` aliases for both `PROTOCOL_HURRA` and `PROTOCOL_FERRUM` (Ferrum = no-op stubs). |
 

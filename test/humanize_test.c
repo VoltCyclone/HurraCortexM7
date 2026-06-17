@@ -148,6 +148,31 @@ int main(void) {
         CHECK(labs(s - 3000L*4) <= 2, "conservation holds with interval feed");
     }
 
+    /* (K) humanize_pending includes sub-pixel residual so a tiny owed value is
+     * not dropped the moment |owed| falls below HZ_IDLE_EPS. */
+    humanize_init(1000);
+    humanize_set_level(2);
+    {
+        int16_t dx = 1, dy = 0;
+        humanize_filter(&dx, &dy);       /* may deliver 0 and leave a residual */
+        /* Either it delivered something or pending should still be true. */
+        CHECK(dx != 0 || humanize_pending(), "pending: residual is not ignored");
+    }
+
+    /* (L) EWMA measured interval is reclamped to [125, 10000] µs so huge idle
+     * gaps cannot push the internal estimate past the allowed PIT range. */
+    humanize_init(1000);
+    humanize_set_level(2);
+    {
+        uint32_t t = 0;
+        for (int i = 0; i < 8; i++) { humanize_record_arrival(t); t += 1000; }
+        uint32_t before = humanize_measured_interval_us();
+        CHECK(before >= 900 && before <= 1100, "EWMA converged near 1ms");
+        humanize_record_arrival(t + 5000000); /* 5s dropout, should be rejected */
+        uint32_t after = humanize_measured_interval_us();
+        CHECK(after >= 900 && after <= 1100, "EWMA stable after rejected dropout");
+    }
+
     printf(failures ? "\n%d FAILED\n" : "\nALL PASSED\n", failures);
     return failures ? 1 : 0;
 }

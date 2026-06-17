@@ -52,15 +52,42 @@ static volatile uint32_t *endptctrl_reg(uint8_t ep)
 	return (volatile uint32_t *)(0x402E0000 + 0x1C0 + ep * 4);
 }
 
+// Set or clear an endpoint halt.  On clear, also reset the data toggle by
+// writing the TXR/RXR bit (the hardware uses the write-1-to-toggle semantics).
+static void endpoint_set_halt(uint8_t ep_num, bool halt, bool in)
+{
+	if (ep_num == 0 || ep_num >= USB_DEV_NUM_ENDPOINTS) return;
+	volatile uint32_t *epctrl = endptctrl_reg(ep_num);
+	if (in) {
+		if (halt) {
+			*epctrl |= USB_ENDPTCTRL_TXS;
+		} else {
+			*epctrl &= ~USB_ENDPTCTRL_TXS;
+			*epctrl |= USB_ENDPTCTRL_TXR;
+		}
+	} else {
+		if (halt) {
+			*epctrl |= USB_ENDPTCTRL_RXS;
+		} else {
+			*epctrl &= ~USB_ENDPTCTRL_RXS;
+			*epctrl |= USB_ENDPTCTRL_RXR;
+		}
+	}
+	asm volatile("dsb" ::: "memory");
+}
+
 // Prime an interrupt IN endpoint from a specific bank buffer.
 // Caller must ensure EP is not busy.
+__attribute__((section(".fastrun")))
 static void prime_int_ep(uint8_t ep_num, uint8_t slot, uint8_t bank, uint16_t len)
 {
 	uint8_t qh_idx = ep_num * 2 + 1;
+	uint32_t buf_addr = (uint32_t)int_tx_buf[slot][bank];
 
 	dtd_int_tx[slot].next = DTD_TERMINATE;
 	dtd_int_tx[slot].token = DTD_ACTIVE | DTD_IOC | DTD_TOTAL_BYTES(len);
-	dtd_int_tx[slot].buffer[0] = (uint32_t)int_tx_buf[slot][bank];
+	dtd_int_tx[slot].buffer[0] = buf_addr;
+	dtd_int_tx[slot].buffer[1] = (buf_addr + 4096u) & ~0xFFFu;
 
 	dqh_list[qh_idx].next = (uint32_t)&dtd_int_tx[slot];
 	dqh_list[qh_idx].token = 0;
@@ -399,10 +426,26 @@ static void handle_standard_request(const usb_setup_t *setup)
 	case 0x00: // GET_STATUS
 		handle_get_status(setup);
 		break;
-	case 0x01: // CLEAR_FEATURE
-	case 0x03: // SET_FEATURE
+	case 0x01: { // CLEAR_FEATURE
+		uint8_t recip = setup->bmRequestType & 0x1Fu;
+		if (recip == 0x02 && setup->wValue == 0) { // ENDPOINT_HALT
+			uint8_t ep_num = setup->wIndex & 0x0Fu;
+			bool in = (setup->wIndex & 0x80u) != 0;
+			endpoint_set_halt(ep_num, false, in);
+		}
 		ep0_tx_data(NULL, 0);
 		break;
+	}
+	case 0x03: { // SET_FEATURE
+		uint8_t recip = setup->bmRequestType & 0x1Fu;
+		if (recip == 0x02 && setup->wValue == 0) { // ENDPOINT_HALT
+			uint8_t ep_num = setup->wIndex & 0x0Fu;
+			bool in = (setup->wIndex & 0x80u) != 0;
+			endpoint_set_halt(ep_num, true, in);
+		}
+		ep0_tx_data(NULL, 0);
+		break;
+	}
 	case 0x08: { // GET_CONFIGURATION
 		uint8_t cfg = (dev_state == USB_DEV_STATE_CONFIGURED)
 			? cap_desc->config_desc[5] : 0; // bConfigurationValue
@@ -594,9 +637,12 @@ bool usb_device_init(const captured_descriptors_t *desc)
 	USBPHY1_PWD = 0;
 	USB1_USBMODE = USB_USBMODE_CM(2) | USB_USBMODE_SLOM;
 	memset(dqh_list, 0, sizeof(dqh_list));
-	dqh_list[0].config = DQH_MAX_PACKET(64) | DQH_IOS;
+	uint16_t ep0_mps = cap_desc->ep0_maxpkt;
+	if (ep0_mps != 8 && ep0_mps != 16 && ep0_mps != 32 && ep0_mps != 64)
+		ep0_mps = 64; // fallback for malformed capture
+	dqh_list[0].config = DQH_MAX_PACKET(ep0_mps) | DQH_IOS;
 	dqh_list[0].next = DTD_TERMINATE;
-	dqh_list[1].config = DQH_MAX_PACKET(64);
+	dqh_list[1].config = DQH_MAX_PACKET(ep0_mps);
 	dqh_list[1].next = DTD_TERMINATE;
 	asm volatile("dsb" ::: "memory");
 	USB1_ENDPOINTLISTADDR = (uint32_t)dqh_list;
@@ -628,8 +674,18 @@ void usb_device_poll(void)
 			while (done) {
 				uint8_t ep = (uint8_t)__builtin_ctz(done);
 				done &= done - 1; // clear lowest set bit
+				uint8_t slot = ep_to_slot[ep];
+
+				// Recover from a device-side dTD halt/error: clear the stall
+				// condition and reset the data toggle so the next prime starts
+				// from a known-good state.
+				uint32_t dtd_token = dtd_int_tx[slot].token;
+				if (__builtin_expect(!!(dtd_token & (DTD_HALTED | DTD_BUFFER_ERR |
+				                                     DTD_XACT_ERR)), 0)) {
+					endpoint_set_halt(ep, false, true);
+				}
+
 				if (pending_len[ep] > 0) {
-					uint8_t slot = ep_to_slot[ep];
 					uint8_t bank = ((active_bank_mask >> ep) ^ 1) & 1;
 					prime_int_ep(ep, slot, bank, pending_len[ep]);
 					pending_len[ep] = 0;
@@ -682,8 +738,11 @@ int usb_device_poll_out(uint8_t ep_num, uint8_t **data_ptr)
 	}
 	uint16_t maxpkt = out_maxpkt[slot];
 	if (token & (DTD_HALTED | DTD_BUFFER_ERR | DTD_XACT_ERR)) {
-		// Error — re-prime on the same bank and report none
+		// On a halt, clear the stall and reset the data toggle; for other
+		// errors just re-prime on the same bank and report none.
 		uint8_t bank = (out_active_bank_mask >> ep_num) & 1;
+		if (token & DTD_HALTED)
+			endpoint_set_halt(ep_num, false, false);
 		prime_int_out_ep(ep_num, slot, bank, maxpkt);
 		return 0;
 	}

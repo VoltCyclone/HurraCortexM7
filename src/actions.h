@@ -10,11 +10,11 @@ extern uint8_t  g_buttons;
 extern uint8_t  g_kb_modifier;
 extern uint8_t  g_kb_keys[6];
 extern int32_t  g_pos_x, g_pos_y;
-extern uint16_t g_lock_mask;
 
 void    act_init(void);
 int8_t  act_button_set(uint8_t mask, uint8_t action);    // action: 0=up, 1=down
 void    act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms);
+void    act_click_tick(void);            // step scheduled click sequences from poll loop
 void    act_move(int16_t dx, int16_t dy);
 int8_t  act_kb_down(uint8_t key);
 void    act_kb_up(uint8_t key);
@@ -22,6 +22,7 @@ void    act_kb_press(uint8_t key, uint32_t delay_ms);
 uint8_t act_kb_isdown(uint8_t key);
 void    act_kb_init(void);
 void    act_kb_mask(uint8_t key, uint8_t mode);
+uint8_t act_kb_mask_get(uint8_t key);                 // 0 = unmasked, else stored mode
 
 void act_wheel(int8_t ticks);
 
@@ -38,7 +39,7 @@ void act_set_swap_xy(bool on);
 // while injected input on the same control still passes. Enforced in the merge
 // path (src/kmbox.c); these only manage the mask state. The mouse-button/axis
 // bits reuse the lock-bit order (ml=0,mr=1,mm=2,ms1=3,ms2=4,mx=5,my=6) but in a
-// dedicated bitmap so they do not collide with g_lock_mask's injection gating.
+// dedicated bitmap (bit order: ml=0,mr=1,mm=2,ms1=3,ms2=4,mx=5,my=6,wheel=7).
 #define PHYS_MASK_ML    0
 #define PHYS_MASK_MR    1
 #define PHYS_MASK_MM    2

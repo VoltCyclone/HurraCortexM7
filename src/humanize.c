@@ -61,7 +61,6 @@ static struct {
     float    n_perp;                /* correlated perpendicular noise state */
     uint32_t a, b, c, ctr;          /* SFC32 */
     uint32_t timing_lfsr;
-    int      idle;
     /* adaptive feed-rate: measured delivery interval (GPT2 µs) */
     uint32_t last_ts_us;            /* timestamp of previous report (0 = none) */
     uint32_t meas_interval_us;      /* EWMA-smoothed delivery interval */
@@ -129,7 +128,6 @@ void humanize_init(uint32_t interval_us) {
 }
 
 /* ── adaptive feed-rate: measured delivery interval ────────────────────── */
-HZ_FASTRUN
 void humanize_record_arrival(uint32_t ts_us) {
     if (S.arrival_count == 0) {
         S.last_ts_us = ts_us;
@@ -139,6 +137,9 @@ void humanize_record_arrival(uint32_t ts_us) {
     uint32_t dt = ts_us - S.last_ts_us;          /* unsigned, single-wrap safe */
     uint32_t cur = S.meas_interval_us;
     if (cur != 0) {
+        /* Clamp cur before the dropout multiply so the threshold cannot overflow
+         * and the EWMA cannot drift beyond the allowed PIT range. */
+        if (cur > HZ_LDVAL_US_MAX) cur = HZ_LDVAL_US_MAX;
         /* Reject outliers before they pollute the EWMA:
          *  - dropout (idle gap / unplug): far longer than expected → rebase, no update
          *  - burst / double-report / USB retry: far shorter → ignore entirely */
@@ -149,10 +150,16 @@ void humanize_record_arrival(uint32_t ts_us) {
     if (cur == 0) {
         S.meas_interval_us = dt;                 /* seed EWMA with first interval */
     } else {
-        /* EWMA: cur += (dt - cur) * alpha, alpha = 1/2^SHIFT, integer, signed step */
-        S.meas_interval_us = (uint32_t)((int32_t)cur +
-            (((int32_t)dt - (int32_t)cur) >> HZ_MEAS_EWMA_SHIFT));
+        /* EWMA update using unsigned branch logic (avoids implementation-defined
+         * signed right shift).  alpha = 1/2^SHIFT. */
+        uint32_t step = (dt > cur) ? (dt - cur) : (cur - dt);
+        step >>= HZ_MEAS_EWMA_SHIFT;
+        S.meas_interval_us = (dt > cur) ? (cur + step) : (cur - step);
     }
+    /* Keep the internal EWMA bounded to the allowed PIT range; callers that
+     * convert to LDVAL also clamp, but bounding here prevents threshold drift. */
+    if (S.meas_interval_us < HZ_LDVAL_US_MIN) S.meas_interval_us = HZ_LDVAL_US_MIN;
+    if (S.meas_interval_us > HZ_LDVAL_US_MAX) S.meas_interval_us = HZ_LDVAL_US_MAX;
     if (S.arrival_count < 0xFFFFFFFFu) S.arrival_count++;
 }
 
@@ -160,6 +167,7 @@ uint32_t humanize_measured_interval_us(void) {
     return S.meas_interval_us;
 }
 
+HZ_FASTRUN
 uint32_t humanize_target_ldval(uint32_t pit_clk_hz) {
     if (S.arrival_count < HZ_MEAS_MIN_COUNT || S.meas_interval_us == 0)
         return 0;                                /* not yet confident */
@@ -209,11 +217,9 @@ void humanize_filter(int16_t *dx, int16_t *dy) {
 
     if (fabsf(S.owed_x) < HZ_IDLE_EPS && fabsf(S.owed_y) < HZ_IDLE_EPS &&
         fabsf(S.res_x) < 0.5f && fabsf(S.res_y) < 0.5f) {
-        if (S.idle < 1000) S.idle++;
         *dx = 0; *dy = 0;
         return;
     }
-    S.idle = 0;
 
     /* Deliver all owed motion this frame (cap-with-carry below handles the
      * rare >127/frame flick). No fractional drain → no latency / no smear. */
@@ -268,7 +274,8 @@ void humanize_return(int16_t dx, int16_t dy) {
 
 HZ_FASTRUN
 bool humanize_pending(void) {
-    return fabsf(S.owed_x) >= HZ_IDLE_EPS || fabsf(S.owed_y) >= HZ_IDLE_EPS;
+    return fabsf(S.owed_x) >= HZ_IDLE_EPS || fabsf(S.owed_y) >= HZ_IDLE_EPS ||
+           fabsf(S.res_x) >= 0.5f || fabsf(S.res_y) >= 0.5f;
 }
 
 HZ_FASTRUN

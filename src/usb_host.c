@@ -41,6 +41,7 @@ static bool        intr_out_transfer_active[MAX_INTR_OUT_EPS];
 static uint32_t    intr_out_prime_time[MAX_INTR_OUT_EPS];
 static uint8_t     intr_out_dev_addr[MAX_INTR_OUT_EPS];
 static uint8_t     intr_out_ep_num[MAX_INTR_OUT_EPS];
+static uint16_t    intr_out_maxpkt[MAX_INTR_OUT_EPS];
 static uint8_t     num_intr_out_eps = 0;
 static uint32_t periodic_list[32] __attribute__((section(".dmabuffers"), aligned(4096)));
 
@@ -450,61 +451,57 @@ static void link_periodic_schedule(void)
 static uint32_t intr_halt_count[MAX_INTR_EPS];
 static uint32_t intr_timeout_count[MAX_INTR_EPS];
 static uint32_t intr_error_count[MAX_INTR_EPS];
-// OUT-side diagnostics — only timeout is currently observable since out_send
-// detects only the ACTIVE-past-100ms case; halt/error decoding for completed
-// OUT QTDs would require checking before overwriting the token next call.
+static uint32_t intr_saved_cap1[MAX_INTR_EPS];
+static bool     intr_halt_recovering[MAX_INTR_EPS];
+
+// OUT-side diagnostics and recovery state.
 static uint32_t intr_out_timeout_count[MAX_INTR_OUT_EPS];
-static uint32_t intr_poll_debug_count;
+static uint32_t intr_out_halt_count[MAX_INTR_OUT_EPS];
+static uint32_t intr_out_error_count[MAX_INTR_OUT_EPS];
+static uint32_t intr_out_saved_cap1[MAX_INTR_OUT_EPS];
+static bool     intr_out_halt_recovering[MAX_INTR_OUT_EPS];
 
 // Send CLEAR_FEATURE(ENDPOINT_HALT) via fire-and-forget to clear a stalled EP.
 // Uses the async schedule; caller should check usb_host_control_async_busy() first.
 static usb_setup_t clear_halt_setup __attribute__((section(".dmabuffers"), aligned(32)));
 
-static void intr_clear_halt(uint8_t index)
+static void intr_clear_halt_ep(uint8_t addr, uint8_t ep_num, bool in)
 {
 	if (usb_host_control_async_busy()) return; // don't clobber in-flight transfer
 	clear_halt_setup.bmRequestType = 0x02; // host-to-device, standard, endpoint
 	clear_halt_setup.bRequest = 1;         // CLEAR_FEATURE
 	clear_halt_setup.wValue = 0;           // ENDPOINT_HALT
-	clear_halt_setup.wIndex = 0x80 | intr_ep_num[index]; // IN endpoint
+	clear_halt_setup.wIndex = in ? (0x80u | ep_num) : ep_num;
 	clear_halt_setup.wLength = 0;
-	usb_host_control_transfer_fire(intr_dev_addr[index], 64,
-		&clear_halt_setup, NULL);
+	usb_host_control_transfer_fire(addr, 64, &clear_halt_setup, NULL);
 }
 
-// Recover a halted periodic QH: disable S-mask to prevent HC access,
-// clear halt, re-prime transfer, then restore S-mask.
+// Start recovery for a halted periodic IN QH.  We stop the host controller from
+// touching the QH (zero S-mask), clear the halted qTD, reset the data toggle to
+// DATA0 (the device resets its toggle when the halt is cleared), and fire an
+// asynchronous CLEAR_FEATURE(ENDPOINT_HALT).  Re-priming happens later, after
+// the control transfer completes, so we never race the HC against a STALLed EP.
 __attribute__((cold, noinline))
 static void intr_halt_recover(uint8_t index, uint16_t len)
 {
 	ehci_qh_t *qh = &qh_intr[index];
-	uint8_t *buf = intr_buf[index];
 
 	intr_halt_count[index]++;
+	intr_halt_recovering[index] = true;
 
-	// Disable S-mask so HC won't touch this QH during re-prime
-	uint32_t saved_cap1 = qh->capabilities[1];
-	qh->capabilities[1] = saved_cap1 & ~0xFFu; // zero S-mask
+	// Disable S-mask so HC won't touch this QH during recovery.
+	intr_saved_cap1[index] = qh->capabilities[1];
+	qh->capabilities[1] = intr_saved_cap1[index] & ~0xFFu;
 	asm volatile("dsb" ::: "memory");
 
-	// Clear halt and re-prime
-	uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;
+	// Clear the halt bit and reset toggle to DATA0.
 	qh->next     = QTD_TERMINATE;
 	qh->alt_next = QTD_TERMINATE;
-	qh->token    = toggle | QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
-		QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
-	set_qtd_buffers_small(qh->buffer, buf);
+	qh->token    = QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3);
 	asm volatile("dsb" ::: "memory");
 
-	// Restore S-mask to re-enable periodic processing
-	qh->capabilities[1] = saved_cap1;
-	asm volatile("dsb" ::: "memory");
-
-	intr_transfer_active[index] = true;
-	intr_prime_time[index] = millis();
-
-	// Tell the device to clear its STALL condition
-	intr_clear_halt(index);
+	// Tell the device to clear its STALL condition.
+	intr_clear_halt_ep(intr_dev_addr[index], intr_ep_num[index], true);
 }
 
 void usb_host_interrupt_init(uint8_t index, uint8_t addr, uint8_t ep,
@@ -574,11 +571,15 @@ void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
 	qh->alt_next = QTD_TERMINATE;
 	qh->token = 0;
 
-	intr_out_initialized[index]     = true;
-	intr_out_transfer_active[index] = false;
-	intr_out_dev_addr[index]        = addr;
-	intr_out_ep_num[index]          = ep & 0x0F;
-	intr_out_timeout_count[index]   = 0;
+	intr_out_initialized[index]      = true;
+	intr_out_transfer_active[index]  = false;
+	intr_out_dev_addr[index]         = addr;
+	intr_out_ep_num[index]           = ep & 0x0F;
+	intr_out_maxpkt[index]           = maxpkt;
+	intr_out_timeout_count[index]    = 0;
+	intr_out_halt_count[index]       = 0;
+	intr_out_error_count[index]      = 0;
+	intr_out_halt_recovering[index]  = false;
 
 	if (index >= num_intr_out_eps)
 		num_intr_out_eps = index + 1;
@@ -591,6 +592,7 @@ bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t le
 {
 	if (index >= MAX_INTR_OUT_EPS || !intr_out_initialized[index]) return false;
 	if (len > sizeof(intr_out_buf[0])) return false;
+	if (intr_out_halt_recovering[index]) return false;
 
 	// Check whether the previous QTD has completed; if still active, refuse —
 	// caller must drain before sending the next packet.
@@ -631,6 +633,83 @@ void usb_host_interrupt_dump_state(void)
 {
 }
 
+// Poll an interrupt OUT endpoint: detect completion, timeout, halt, and error
+// conditions and recover from halts with CLEAR_FEATURE(ENDPOINT_HALT) + DATA0
+// toggle reset.  The main loop should call this every poll cycle for each
+// configured OUT endpoint; usb_host_interrupt_out_send() will refuse to arm a
+// new transfer while recovery is in progress.
+__attribute__((section(".fastrun")))
+void usb_host_interrupt_out_poll(uint8_t index)
+{
+	if (index >= MAX_INTR_OUT_EPS || !intr_out_initialized[index]) return;
+
+	// Finish a previous halt recovery.
+	if (__builtin_expect(intr_out_halt_recovering[index], 0)) {
+		if (usb_host_control_async_busy()) return;
+		intr_out_halt_recovering[index] = false;
+		ehci_qh_t *qh = &qh_intr_out[index];
+		qh->capabilities[1] = intr_out_saved_cap1[index];
+		qh->next     = QTD_TERMINATE;
+		qh->alt_next = QTD_TERMINATE;
+		qh->token    = QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_OUT |
+			QTD_TOKEN_NBYTES(intr_out_maxpkt[index]) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
+		set_qtd_buffers_small(qh->buffer, intr_out_buf[index]);
+		asm volatile("dsb" ::: "memory");
+		intr_out_transfer_active[index] = true;
+		intr_out_prime_time[index]      = millis();
+		return;
+	}
+
+	if (!intr_out_transfer_active[index]) return;
+
+	uint32_t token = qh_intr_out[index].token;
+
+	if (__builtin_expect(!!(token & QTD_TOKEN_ACTIVE), 1)) {
+		if (__builtin_expect((millis() - intr_out_prime_time[index]) > 100, 0)) {
+			intr_out_timeout_count[index]++;
+			intr_out_transfer_active[index] = false;
+			qh_intr_out[index].token = token & QTD_TOKEN_TOGGLE;
+			qh_intr_out[index].next  = QTD_TERMINATE;
+			asm volatile("dsb" ::: "memory");
+		}
+		return;
+	}
+
+	// Transfer completed — decode status.
+	intr_out_transfer_active[index] = false;
+
+	if (__builtin_expect(!!(token & QTD_TOKEN_HALTED), 0)) {
+		intr_out_halt_count[index]++;
+		intr_out_halt_recovering[index] = true;
+
+		// Stop HC from touching this QH while we clear the device halt.
+		intr_out_saved_cap1[index] = qh_intr_out[index].capabilities[1];
+		qh_intr_out[index].capabilities[1] &= ~0xFFu;
+		asm volatile("dsb" ::: "memory");
+
+		// Clear halt bit and reset toggle to DATA0.
+		qh_intr_out[index].next     = QTD_TERMINATE;
+		qh_intr_out[index].alt_next = QTD_TERMINATE;
+		qh_intr_out[index].token    = QTD_TOKEN_NBYTES(intr_out_maxpkt[index]) |
+			QTD_TOKEN_CERR(3);
+		asm volatile("dsb" ::: "memory");
+
+		intr_clear_halt_ep(intr_out_dev_addr[index], intr_out_ep_num[index], false);
+		return;
+	}
+
+	if (__builtin_expect(!!(token & (QTD_TOKEN_BUFERR | QTD_TOKEN_BABBLE |
+	                                 QTD_TOKEN_XACTERR)), 0)) {
+		intr_out_error_count[index]++;
+		qh_intr_out[index].token = token & QTD_TOKEN_TOGGLE;
+		qh_intr_out[index].next  = QTD_TERMINATE;
+		asm volatile("dsb" ::: "memory");
+		return;
+	}
+
+	// Successful completion: leave inactive; next send will re-arm.
+}
+
 // Internal poll: primes QH, checks completion, handles halt/error/timeout.
 // On success returns bytes transferred and sets *buf_out to the DMA buffer.
 // Returns 0 when not yet complete, -1 on error.
@@ -639,6 +718,23 @@ static int intr_poll_internal(uint8_t index, uint16_t len, uint8_t **buf_out)
 {
 	ehci_qh_t *qh  = &qh_intr[index];
 	uint8_t   *buf = intr_buf[index];
+
+	// Finish a previous halt recovery: wait for CLEAR_FEATURE to complete, then
+	// restore the periodic schedule and re-prime with DATA0.
+	if (__builtin_expect(intr_halt_recovering[index], 0)) {
+		if (usb_host_control_async_busy()) return 0;
+		intr_halt_recovering[index] = false;
+		qh->capabilities[1] = intr_saved_cap1[index];
+		qh->next     = QTD_TERMINATE;
+		qh->alt_next = QTD_TERMINATE;
+		qh->token    = QTD_TOKEN_ACTIVE | QTD_TOKEN_PID_IN |
+			QTD_TOKEN_NBYTES(len) | QTD_TOKEN_CERR(3) | QTD_TOKEN_IOC;
+		set_qtd_buffers_small(qh->buffer, buf);
+		asm volatile("dsb" ::: "memory");
+		intr_transfer_active[index] = true;
+		intr_prime_time[index] = millis();
+		return 0;
+	}
 
 	if (__builtin_expect(!intr_transfer_active[index], 0)) {
 		uint32_t toggle = qh->token & QTD_TOKEN_TOGGLE;

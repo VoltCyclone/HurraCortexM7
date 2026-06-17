@@ -21,7 +21,6 @@ void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons,
                         int8_t wheel);
 void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6]);
 
-void kmbox_schedule_click_release(uint8_t button_mask, uint32_t delay_ms);
 void kmbox_schedule_kb_release(uint8_t key, uint32_t delay_ms);
 
 uint32_t kmbox_frame_count(void);
