@@ -49,14 +49,7 @@ enum {
     TYPE_KB_MULTIDOWN   = 0x46,
     TYPE_KB_MULTIUP     = 0x47,
     TYPE_KB_MULTIPRESS  = 0x48,
-    // 0x60–0x6F locks + catch
-    TYPE_LOCK_ML  = 0x60,
-    TYPE_LOCK_MR  = 0x61,
-    TYPE_LOCK_MM  = 0x62,
-    TYPE_LOCK_MS1 = 0x63,
-    TYPE_LOCK_MS2 = 0x64,
-    TYPE_LOCK_MX  = 0x65,
-    TYPE_LOCK_MY  = 0x66,
+    // 0x60–0x6F locks removed (dead feature); catch + phys-mask remain
     TYPE_CATCH_XY = 0x67,
     TYPE_PHYS_MASK = 0x68,   // KMBox Net physical-input mask / unmask_all
     // 0x70–0x73 reserved/unused (removed Hurra-only STREAM_AXIS/BTN/MOUSE/KB)
@@ -480,35 +473,7 @@ static TF_Result l_kb_multiup(TinyFrame *tf, TF_Msg *m)
 static TF_Result l_kb_multipress(TinyFrame *tf, TF_Msg *m)
 { return multikey_listener(tf, m, kb_press_default); }
 
-// ── lock listeners + catch_xy ────────────────────────────────────────────────
-
-static TF_Result lock_listener(TinyFrame *tf, TF_Msg *msg, uint8_t bit)
-{
-    (void)tf;
-    track_id(msg->frame_id);
-    extern uint16_t g_lock_mask;
-    uint16_t bitmask = (uint16_t)(1u << bit);
-    if (msg->len == 0) {
-        uint8_t v = (g_lock_mask & bitmask) ? 1 : 0;
-        send_reply(msg, &v, 1);
-        return TF_STAY;
-    }
-    if (msg->len != 1) { s_payload_invalid++; return TF_STAY; }
-    if (msg->data[0]) g_lock_mask |= bitmask;
-    else              g_lock_mask &= ~bitmask;
-    return TF_STAY;
-}
-
-#define MAKE_LOCK(NAME, BIT) \
-static TF_Result l_##NAME(TinyFrame *tf, TF_Msg *m) { return lock_listener(tf, m, BIT); }
-
-MAKE_LOCK(lock_ml,  0)
-MAKE_LOCK(lock_mr,  1)
-MAKE_LOCK(lock_mm,  2)
-MAKE_LOCK(lock_ms1, 3)
-MAKE_LOCK(lock_ms2, 4)
-MAKE_LOCK(lock_mx,  5)
-MAKE_LOCK(lock_my,  6)
+// ── catch_xy ──────────────────────────────────────────────────────────────────
 
 static TF_Result l_catch_xy(TinyFrame *tf, TF_Msg *msg)
 {
@@ -714,13 +679,6 @@ void hurra_init(void)
     TF_AddTypeListener(&s_tf, TYPE_KB_MULTIDOWN,  l_kb_multidown);
     TF_AddTypeListener(&s_tf, TYPE_KB_MULTIUP,    l_kb_multiup);
     TF_AddTypeListener(&s_tf, TYPE_KB_MULTIPRESS, l_kb_multipress);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_ML,  l_lock_ml);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_MR,  l_lock_mr);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_MM,  l_lock_mm);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_MS1, l_lock_ms1);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_MS2, l_lock_ms2);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_MX,  l_lock_mx);
-    TF_AddTypeListener(&s_tf, TYPE_LOCK_MY,  l_lock_my);
     TF_AddTypeListener(&s_tf, TYPE_CATCH_XY, l_catch_xy);
     TF_AddTypeListener(&s_tf, TYPE_PHYS_MASK, l_phys_mask);
     TF_AddTypeListener(&s_tf, TYPE_INIT,   l_init);

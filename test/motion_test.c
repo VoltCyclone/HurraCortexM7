@@ -17,12 +17,14 @@ static int failures = 0;
 static uint32_t g_ms;
 uint32_t millis(void) { return g_ms; }
 
-// Injection sink: accumulate the deltas the motion program emits.
+// Injection sink: accumulate the deltas and track the latest button bitmap.
 static long g_sum_x, g_sum_y;
 static int  g_emits;
+static uint8_t g_last_buttons;
 void kmbox_inject_mouse(int16_t dx, int16_t dy, uint8_t buttons, int8_t wheel) {
-    (void)buttons; (void)wheel;
+    (void)wheel;
     g_sum_x += dx; g_sum_y += dy;
+    g_last_buttons = buttons;
     if (dx || dy) g_emits++;
 }
 void kmbox_inject_keyboard(uint8_t m, const uint8_t k[6]) { (void)m; (void)k; }
@@ -112,6 +114,26 @@ int main(void) {
     CHECK(g_sum_x == 42 && g_sum_y == -9, "dur=0: immediate move delivers full delta");
     act_motion_tick();                     // nothing in flight
     CHECK(g_sum_x == 42 && g_sum_y == -9, "dur=0: no trailing motion");
+
+    // (G) Multi-click: count > 1 produces the correct number of press/release
+    // cycles and leaves g_buttons (and the injected bitmap) released at the end.
+    reset_sink();
+    g_ms = 0;
+    act_click(1, 3, 10);                   // 3 left clicks, 10 ms hold
+    CHECK((g_last_buttons & 0x01) != 0, "multiclick: initial press injected");
+    int presses = 1;                       // count the initial press
+    int releases = 0;
+    uint8_t prev = g_last_buttons;
+    for (uint32_t t = 1; t <= 80; t++) {
+        g_ms = t;
+        act_click_tick();
+        if ((g_last_buttons & 0x01) && !(prev & 0x01)) presses++;
+        if (!(g_last_buttons & 0x01) && (prev & 0x01)) releases++;
+        prev = g_last_buttons;
+    }
+    CHECK(presses == 3, "multiclick: three button-down injections");
+    CHECK(releases == 3, "multiclick: three button-up injections");
+    CHECK((g_last_buttons & 0x01) == 0, "multiclick: button released after sequence");
 
     if (failures == 0) printf("\nALL PASSED\n");
     else               printf("\n%d FAILURE(S)\n", failures);

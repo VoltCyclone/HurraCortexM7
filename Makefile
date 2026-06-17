@@ -2,6 +2,7 @@ TOOLCHAIN = /Users/ramseymcgrath/.platformio/packages/toolchain-gccarmnoneeabi-t
 CC      = $(TOOLCHAIN)/arm-none-eabi-gcc
 OBJCOPY = $(TOOLCHAIN)/arm-none-eabi-objcopy
 SIZE    = $(TOOLCHAIN)/arm-none-eabi-size
+HOST_CC ?= cc
 
 TARGET = firmware
 
@@ -39,20 +40,23 @@ DEFINES = -DARDUINO_TEENSY_MICROMOD -D__IMXRT1062__ -DF_CPU=$(F_CPU) \
           -DCMD_BAUD=$(CMD_BAUD) $(PROTO_DEF)
 
 CFLAGS = $(MCU_FLAGS) $(DEFINES) \
-         -Os -Wall -Wno-unused-variable \
+         -Os -Wall \
          -ffunction-sections -fdata-sections \
          -flto -fsingle-precision-constant \
-         -Iinclude -Isrc -Isrc/third_party/TinyFrame
+         -Iinclude -Isrc -Isrc/third_party/TinyFrame \
+         -MD -MP
 
 LDFLAGS = $(MCU_FLAGS) \
           -Tcore/imxrt1062_mm.ld \
           -Wl,--gc-sections \
+          -Wl,-Map=$(TARGET).map \
+          -Wl,--print-memory-usage \
           -flto -fuse-linker-plugin \
           --specs=nano.specs --specs=nosys.specs
 
 CORE_SRC = core/startup.c core/bootdata.c
 SRC = src/main.c src/usb_host.c src/usb_device.c src/desc_capture.c \
-      src/kmbox.c src/humanize.c src/actions.c src/led.c \
+      src/kmbox.c src/humanize.c src/actions.c src/led.c src/kb_layout.c \
       $(PROTO_SRC)
 
 OBJ = $(CORE_SRC:.c=.o) $(SRC:.c=.o)
@@ -75,7 +79,7 @@ ifeq ($(PROTOCOL),hurra)
 else
   HOT_SRC += src/ferrum.o
 endif
-$(HOT_SRC): CFLAGS := $(subst -Os,-O2,$(CFLAGS)) -ffast-math
+$(HOT_SRC): CFLAGS := $(patsubst -O%,,$(CFLAGS)) -O2 -ffast-math
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -84,19 +88,30 @@ flash: $(TARGET).hex
 	teensy_loader_cli --mcu=TEENSY_MICROMOD -w -v $(TARGET).hex
 
 clean:
-	rm -f $(OBJ) $(TARGET).elf $(TARGET).hex
+	rm -f $(OBJ) $(OBJ:.o=.d) $(TARGET).elf $(TARGET).hex $(TARGET).map
+	rm -f /tmp/humanize_test /tmp/motion_test /tmp/synth_cadence_test
 
-.PHONY: all flash clean
+.PHONY: all flash clean test test-all
 
 # Host-native unit tests (no cross-compile). humanize.c must stay free of
 # hardware headers behind HUMANIZE_HOSTTEST so it builds with system gcc.
-.PHONY: test
 test:
-	cc -std=c11 -O2 -DHUMANIZE_HOSTTEST -Isrc -o /tmp/humanize_test \
+	$(HOST_CC) -std=c11 -O2 -DHUMANIZE_HOSTTEST -Isrc -o /tmp/humanize_test \
 	   test/humanize_test.c src/humanize.c -lm
 	/tmp/humanize_test
-	cc -std=c11 -O2 -Isrc -o /tmp/motion_test \
+	$(HOST_CC) -std=c11 -O2 -Isrc -o /tmp/motion_test \
 	   test/motion_test.c src/actions.c -lm
 	/tmp/motion_test
-	cc -std=c11 -O2 -Isrc -o /tmp/synth_cadence_test test/synth_cadence_test.c
+	$(HOST_CC) -std=c11 -O2 -Isrc -o /tmp/kb_layout_test \
+	   test/kb_layout_test.c src/kb_layout.c
+	/tmp/kb_layout_test
+	$(HOST_CC) -std=c11 -O2 -Isrc -o /tmp/synth_cadence_test test/synth_cadence_test.c
 	/tmp/synth_cadence_test
+
+# CI-style verification: host tests plus a firmware build for each protocol.
+test-all: test
+	$(MAKE) clean && $(MAKE) PROTOCOL=hurra
+	$(MAKE) clean && $(MAKE) PROTOCOL=ferrum
+
+# Pull in auto-generated header dependencies so edits to headers rebuild dependents.
+-include $(OBJ:.o=.d)

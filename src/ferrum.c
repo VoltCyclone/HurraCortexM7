@@ -66,17 +66,6 @@ static uint8_t s_last_keys[6];
 // --- last-seen buttons bitmap for buttons callback dedup ---------------------
 static uint8_t s_last_buttons;
 
-// --- locks: mapping from name char-tag to bit --------------------------------
-// Bit assignments are local to ferrum.c — only g_lock_mask is shared.
-// 0..4: ml/mr/mm/ms1/ms2  5: mx  6: my
-#define LOCK_BIT_ML  0
-#define LOCK_BIT_MR  1
-#define LOCK_BIT_MM  2
-#define LOCK_BIT_MS1 3
-#define LOCK_BIT_MS2 4
-#define LOCK_BIT_MX  5
-#define LOCK_BIT_MY  6
-
 // =============================================================================
 // Tiny formatters / parsers — no newlib bloat
 // =============================================================================
@@ -276,22 +265,6 @@ static void cmd_wheel(arg_t *args, uint8_t nargs)
 	kmbox_inject_mouse(0, 0, g_buttons, (int8_t)n);
 }
 
-// Generic lock handler.  bit is the LOCK_BIT_* index.
-static void cmd_lock(uint8_t bit, arg_t *args, uint8_t nargs)
-{
-	uint16_t mask = (uint16_t)(1u << bit);
-	if (nargs == 0) {
-		emit_bool((g_lock_mask & mask) ? 1 : 0);
-		return;
-	}
-	if (nargs != 1) return;
-	int32_t s;
-	if (!parse_int(args[0].p, args[0].len, &s)) return;
-	if (s != 0 && s != 1) return;
-	if (s) g_lock_mask |= mask;
-	else   g_lock_mask &= ~mask;
-}
-
 static void cmd_catch_xy(arg_t *args, uint8_t nargs)
 {
 	if (nargs < 1 || nargs > 2) return;
@@ -375,13 +348,9 @@ static void cmd_kb_isdown(arg_t *args, uint8_t nargs)
 static void cmd_kb_mask(arg_t *args, uint8_t nargs)
 {
 	if (nargs == 1) {
-		// Read variant — actions.c does not currently expose a getter
-		// for the masked-key table; report 0 as a conservative default.
-		// (Write path below still works fine.)
 		int32_t k;
 		if (!parse_int(args[0].p, args[0].len, &k)) return;
-		(void)k;
-		emit_bool(0);
+		emit_bool(act_kb_mask_get((uint8_t)k) != 0);
 		return;
 	}
 	if (nargs != 2) return;
@@ -458,14 +427,6 @@ static void dispatch(const char *name, uint8_t name_len, arg_t *args, uint8_t na
 
 	if (name_is(name, name_len, "click"))        { cmd_click(args, nargs); return; }
 	if (name_is(name, name_len, "wheel"))        { cmd_wheel(args, nargs); return; }
-
-	if (name_is(name, name_len, "lock_ml"))      { cmd_lock(LOCK_BIT_ML,  args, nargs); return; }
-	if (name_is(name, name_len, "lock_mr"))      { cmd_lock(LOCK_BIT_MR,  args, nargs); return; }
-	if (name_is(name, name_len, "lock_mm"))      { cmd_lock(LOCK_BIT_MM,  args, nargs); return; }
-	if (name_is(name, name_len, "lock_ms1"))     { cmd_lock(LOCK_BIT_MS1, args, nargs); return; }
-	if (name_is(name, name_len, "lock_ms2"))     { cmd_lock(LOCK_BIT_MS2, args, nargs); return; }
-	if (name_is(name, name_len, "lock_mx"))      { cmd_lock(LOCK_BIT_MX,  args, nargs); return; }
-	if (name_is(name, name_len, "lock_my"))      { cmd_lock(LOCK_BIT_MY,  args, nargs); return; }
 
 	if (name_is(name, name_len, "catch_xy"))     { cmd_catch_xy(args, nargs); return; }
 

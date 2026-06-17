@@ -1,8 +1,10 @@
 *.o
+*.d
 *.elf
 *.hex
 *.bin
 *.uf2
+*.map
 *.bak
 .DS_Store
 

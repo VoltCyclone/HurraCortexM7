@@ -11,7 +11,6 @@ uint8_t  g_buttons;
 uint8_t  g_kb_modifier;
 uint8_t  g_kb_keys[6];
 int32_t  g_pos_x, g_pos_y;
-uint16_t g_lock_mask;
 uint16_t g_phys_mask;   // physical-input suppression (see actions.h PHYS_MASK_*)
 
 typedef struct {
@@ -60,7 +59,6 @@ void act_init(void)
 	memset(g_kb_keys, 0, sizeof(g_kb_keys));
 	g_pos_x = 0;
 	g_pos_y = 0;
-	g_lock_mask = 0;
 	g_phys_mask = 0;
 	memset(&g_click_sched, 0, sizeof(g_click_sched));
 	memset(&g_motion, 0, sizeof(g_motion));
@@ -86,17 +84,57 @@ int8_t act_button_set(uint8_t mask, uint8_t action)
 void act_click(uint8_t button_1based, uint8_t count, uint32_t delay_ms)
 {
 	uint8_t mask = btn_idx_to_mask(button_1based);
+	if (mask == 0 || count == 0) return;
+
+	// Cancel any in-flight click sequence so overlapping clicks don't interleave.
+	// If the previous sequence left a button pressed, release it first so it
+	// can't stay stuck down when the new click targets a different button.
+	if (g_click_sched.button != 0 && g_click_sched.pressed) {
+		uint8_t old_mask = btn_idx_to_mask(g_click_sched.button);
+		if (old_mask && old_mask != mask) {
+			g_buttons &= ~old_mask;
+			kmbox_inject_mouse(0, 0, g_buttons, 0);
+		}
+	}
+	memset(&g_click_sched, 0, sizeof(g_click_sched));
+
 	g_buttons |= mask;
 	kmbox_inject_mouse(0, 0, g_buttons, 0);
 
-	if (count == 1) {
-		kmbox_schedule_click_release(mask, delay_ms);
+	// Schedule the release. For multi-click, act_click_tick() re-presses until
+	// remaining reaches zero, keeping g_buttons and the injected report in sync.
+	g_click_sched.button = button_1based;
+	g_click_sched.remaining = count - 1;
+	g_click_sched.delay_ms = delay_ms;
+	g_click_sched.next_at = millis() + delay_ms;
+	g_click_sched.pressed = true;
+}
+
+void act_click_tick(void)
+{
+	if (g_click_sched.button == 0) return;
+
+	uint32_t now = millis();
+	if (now < g_click_sched.next_at) return;
+
+	uint8_t mask = btn_idx_to_mask(g_click_sched.button);
+	if (g_click_sched.pressed) {
+		// Release the button now.
+		g_buttons &= ~mask;
+		kmbox_inject_mouse(0, 0, g_buttons, 0);
+		if (g_click_sched.remaining == 0) {
+			memset(&g_click_sched, 0, sizeof(g_click_sched));
+			return;
+		}
+		g_click_sched.remaining--;
+		g_click_sched.pressed = false;
+		g_click_sched.next_at = now + g_click_sched.delay_ms;
 	} else {
-		g_click_sched.button = button_1based;
-		g_click_sched.remaining = count - 1;
-		g_click_sched.delay_ms = delay_ms;
-		g_click_sched.next_at = millis() + delay_ms;
+		// Re-press for the next click in the sequence.
+		g_buttons |= mask;
+		kmbox_inject_mouse(0, 0, g_buttons, 0);
 		g_click_sched.pressed = true;
+		g_click_sched.next_at = now + g_click_sched.delay_ms;
 	}
 }
 
@@ -201,6 +239,14 @@ void act_kb_mask(uint8_t key, uint8_t mode)
 			g_masked_count++;
 		}
 	}
+}
+
+uint8_t act_kb_mask_get(uint8_t key)
+{
+	for (uint8_t i = 0; i < g_masked_count; i++) {
+		if (g_masked_keys[i] == key) return g_masked_modes[i];
+	}
+	return 0;
 }
 
 void act_wheel(int8_t ticks)

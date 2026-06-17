@@ -84,6 +84,10 @@ void usb_host_interrupt_dump_state(void);
 
 void usb_host_interrupt_out_init(uint8_t index, uint8_t addr, uint8_t ep,
 	uint16_t maxpkt);
+// Poll an interrupt OUT endpoint for completion/halt/error.  Call once per
+// poll cycle for each configured OUT endpoint.
+void usb_host_interrupt_out_poll(uint8_t index);
 // Returns true if the send was armed (QTD primed). Returns false if a previous
-// send on this slot is still in flight — caller should retry next poll cycle.
+// send on this slot is still in flight or recovering from a halt — caller
+// should retry next poll cycle.
 bool usb_host_interrupt_out_send(uint8_t index, const uint8_t *data, uint16_t len);

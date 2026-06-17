@@ -3,6 +3,7 @@
 #pragma once
 
 #define TF_SOF_BYTE       0x68    // 'h' for Hurra
+#define TF_USE_SOF_BYTE   1       // actually emit/expect the SOF byte (required by Hurra spec §2)
 #define TF_ID_BYTES       1
 #define TF_LEN_BYTES      1
 #define TF_TYPE_BYTES     1

@@ -10,6 +10,7 @@
 #include "actions.h"
 #include "gpt_profile.h"
 #include "synth_cadence.h"
+#include "kb_layout.h"
 #include <string.h>
 
 extern uint32_t millis(void);
@@ -122,9 +123,6 @@ typedef struct {
 	uint8_t  kb_keys[6];
 	bool     kb_dirty;
 
-	uint8_t  click_release_mask;
-	uint32_t click_release_at; // ms, 0=off
-
 	#define MAX_KB_RELEASES 6
 	struct { uint8_t key; uint32_t at; } kb_releases[6];
 	uint8_t kb_release_count;
@@ -175,6 +173,8 @@ static struct {
 	bool     w_is16;
 } mouse_layout;
 static uint8_t cached_mouse_report_len; // actual report length from first real report
+
+static kb_layout_t kb_layout;
 
 static bool merged_this_cycle;
 
@@ -380,6 +380,7 @@ void kmbox_init(void)
 	memset(&mouse_layout, 0, sizeof(mouse_layout));
 	mouse_layout.wheel_bit = 0xFFFF;
 	cached_mouse_report_len = 0;
+	memset(&kb_layout, 0, sizeof(kb_layout));
 
 	link_last_rx_time = 0;
 	last_rx_activity_time = 0;
@@ -596,6 +597,10 @@ void kmbox_cache_endpoints(const captured_descriptors_t *desc)
 			                   desc->ifaces[i].hid_report_desc_len);
 		} else if (desc->ifaces[i].iface_protocol == 1 && !cached_kb_ep) {
 			cached_kb_ep = ep;
+			kb_layout_parse(&kb_layout,
+			                desc->ifaces[i].hid_report_desc,
+			                desc->ifaces[i].hid_report_desc_len,
+			                desc->ifaces[i].interrupt_in_maxpkt);
 		}
 	}
 
@@ -656,12 +661,9 @@ void kmbox_poll_fast(void)
 	// path, so it composes with real-mouse passthrough and humanization.
 	act_motion_tick();
 
-	if (__builtin_expect(inject.click_release_at != 0, 0) && millis() >= inject.click_release_at) {
-		inject.mouse_buttons &= ~inject.click_release_mask;
-		inject.mouse_dirty = true;
-		inject.click_release_mask = 0;
-		inject.click_release_at = 0;
-	}
+	// Step scheduled mouse clicks (single or multi). Keeps g_buttons and the
+	// injected button bitmap consistent.
+	act_click_tick();
 
 	if (__builtin_expect(inject.kb_release_count, 0)) {
 		uint32_t now = millis();
@@ -974,19 +976,27 @@ static void kmbox_merge_report_slow(uint8_t *report, uint8_t len,
 __attribute__((cold, noinline))
 static void kmbox_merge_keyboard(uint8_t *report, uint8_t len)
 {
-	if (len < 8) return;
-	report[0] |= inject.kb_modifier;
+	uint8_t report_len = kb_layout.valid ? kb_layout.report_len : 8;
+	uint8_t mod_off    = kb_layout.valid ? kb_layout.modifier_off : 0;
+	uint8_t keys_off   = kb_layout.valid ? kb_layout.keys_off : 2;
+	uint8_t keys_end   = keys_off + 6;
+
+	if (len < report_len) return;
+	if (kb_layout.valid && kb_layout.report_id && report[0] != kb_layout.report_id)
+		return;
+
+	report[mod_off] |= inject.kb_modifier;
 	for (int i = 0; i < 6; i++) {
 		if (inject.kb_keys[i] == 0) continue;
 		bool found = false;
-		for (int j = 2; j < 8; j++) {
+		for (int j = keys_off; j < keys_end; j++) {
 			if (report[j] == inject.kb_keys[i]) {
 				found = true;
 				break;
 			}
 		}
 		if (!found) {
-			for (int j = 2; j < 8; j++) {
+			for (int j = keys_off; j < keys_end; j++) {
 				if (report[j] == 0) {
 					report[j] = inject.kb_keys[i];
 					break;
@@ -994,7 +1004,7 @@ static void kmbox_merge_keyboard(uint8_t *report, uint8_t len)
 			}
 		}
 	}
-	proto_notify_keys(&report[2]);
+	proto_notify_keys(&report[keys_off]);
 }
 
 // Feature B/C (mouse): runs before injection is merged. Reads the physical
@@ -1059,12 +1069,20 @@ static void kmbox_phys_mouse(uint8_t *report, uint8_t len)
 __attribute__((cold, noinline))
 static void kmbox_phys_keyboard(uint8_t *report, uint8_t len)
 {
-	(void)len;  // caller guarantees len >= 8
+	uint8_t report_len = kb_layout.valid ? kb_layout.report_len : 8;
+	uint8_t mod_off    = kb_layout.valid ? kb_layout.modifier_off : 0;
+	uint8_t keys_off   = kb_layout.valid ? kb_layout.keys_off : 2;
+	uint8_t keys_end   = keys_off + 6;
+
+	if (len < report_len) return;
+	if (kb_layout.valid && kb_layout.report_id && report[0] != kb_layout.report_id)
+		return;
+
 	if (proto_phys_enabled())
-		proto_notify_phys_keys(report[0], &report[2]);
+		proto_notify_phys_keys(report[mod_off], &report[keys_off]);
 
 	if (act_phys_kb_mask_active()) {
-		for (int j = 2; j < 8; j++) {
+		for (int j = keys_off; j < keys_end; j++) {
 			if (report[j] && act_phys_key_masked(report[j]))
 				report[j] = 0;
 		}
@@ -1123,17 +1141,23 @@ void kmbox_send_pending(void)
 
 		if (mouse_layout.wheel_bit != 0xFFFF && inject.mouse_wheel != 0 &&
 		    mouse_layout.wheel_report_id == mouse_layout.report_id) {
-			int32_t w = inject.mouse_wheel;
+			int32_t want = inject.mouse_wheel;
+			int32_t w = want;
 			if (w > mouse_layout.w_max) w = mouse_layout.w_max;
 			if (w < -mouse_layout.w_max) w = -mouse_layout.w_max;
 			write_report_field(synth, sizeof(synth), mouse_layout.wheel_bit,
 			                   mouse_layout.wheel_size, doff, w);
+			inject.mouse_wheel = (int8_t)(want - w);
 		}
 		uint8_t rlen = cached_mouse_report_len;
-		if (rlen == 0) rlen = (cached_mouse_maxpkt < 16) ? (uint8_t)cached_mouse_maxpkt : 16;
+		if (rlen == 0) rlen = (cached_mouse_maxpkt < sizeof(synth)) ? (uint8_t)cached_mouse_maxpkt : sizeof(synth);
+		if (rlen > sizeof(synth)) rlen = sizeof(synth);
 		usb_device_send_report(cached_mouse_ep, synth, rlen);
-		inject.mouse_wheel = 0;
+		// Return any injected motion the report field could not carry so the
+		// humanizer redelivers it when headroom opens.
+		humanize_return((int16_t)(inj_dx - dx), (int16_t)(inj_dy - dy));
 		inject.mouse_dirty = (inject.mouse_buttons != 0 ||
+		                      inject.mouse_wheel != 0 ||
 		                      humanize_pending());
 	}
 	if (__builtin_expect(inject.kb_dirty && cached_kb_ep, 0)) {
@@ -1148,26 +1172,41 @@ static void kmbox_send_wheel_report(void)
 	memset(synth, 0, sizeof(synth));
 	uint8_t doff = mouse_layout.data_off;
 	if (doff) synth[0] = mouse_layout.wheel_report_id;
-	int32_t w = inject.mouse_wheel;
+	int32_t want = inject.mouse_wheel;
+	int32_t w = want;
 	if (w > mouse_layout.w_max) w = mouse_layout.w_max;
 	if (w < -mouse_layout.w_max) w = -mouse_layout.w_max;
 	write_report_field(synth, sizeof(synth), mouse_layout.wheel_bit,
 	                   mouse_layout.wheel_size, doff, w);
 	uint8_t rlen = cached_mouse_report_len;
-	if (rlen == 0) rlen = (cached_mouse_maxpkt < 16) ? (uint8_t)cached_mouse_maxpkt : 16;
+	if (rlen == 0) rlen = (cached_mouse_maxpkt < sizeof(synth)) ? (uint8_t)cached_mouse_maxpkt : sizeof(synth);
+	if (rlen > sizeof(synth)) rlen = sizeof(synth);
 	usb_device_send_report(cached_mouse_ep, synth, rlen);
-	inject.mouse_wheel = 0;
-	inject.mouse_dirty = (inject.mouse_buttons != 0);
+	inject.mouse_wheel = (int8_t)(want - w);
+	inject.mouse_dirty = (inject.mouse_buttons != 0 ||
+	                      inject.mouse_wheel != 0 ||
+	                      humanize_pending());
 }
 
 __attribute__((cold, noinline))
 static void kmbox_send_keyboard_report(void)
 {
-	uint8_t synth[8];
-	synth[0] = inject.kb_modifier;
-	synth[1] = 0;
-	memcpy(&synth[2], inject.kb_keys, 6);
-	usb_device_send_report(cached_kb_ep, synth, 8);
+	uint8_t synth[16];
+	memset(synth, 0, sizeof(synth));
+
+	uint8_t len = kb_layout.valid ? kb_layout.report_len : 8;
+	if (len > sizeof(synth)) len = sizeof(synth);
+
+	if (kb_layout.valid && kb_layout.report_id)
+		synth[0] = kb_layout.report_id;
+
+	uint8_t mod_off  = kb_layout.valid ? kb_layout.modifier_off : 0;
+	uint8_t keys_off = kb_layout.valid ? kb_layout.keys_off : 2;
+
+	synth[mod_off] = inject.kb_modifier;
+	memcpy(&synth[keys_off], inject.kb_keys, 6);
+	usb_device_send_report(cached_kb_ep, synth, len);
+
 	static const uint8_t zeros[6] = {0};
 	inject.kb_dirty = (inject.kb_modifier != 0 ||
 	                    memcmp(inject.kb_keys, zeros, 6) != 0);
@@ -1242,11 +1281,6 @@ void kmbox_inject_keyboard(uint8_t modifier, const uint8_t keys[6])
 	inject.kb_dirty = true;
 }
 
-void kmbox_schedule_click_release(uint8_t button_mask, uint32_t delay_ms)
-{
-	inject.click_release_mask = button_mask;
-	inject.click_release_at = millis() + delay_ms;
-}
 
 void kmbox_schedule_kb_release(uint8_t key, uint32_t delay_ms)
 {

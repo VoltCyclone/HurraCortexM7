@@ -202,9 +202,10 @@ int main(void)
 			if (desc.ifaces[i].iface_protocol != 2) continue;
 			uint8_t bint = desc.ifaces[i].interrupt_in_interval;
 			if (bint == 0) bint = 1;
-			if (speed == 2) {
-				// High-speed: 2^(bInterval-1) * 125 µs
-				interval_us = 125u << (bint > 1 ? bint - 1 : 0);
+			if (speed == USB_SPEED_HIGH) {
+				// High-speed: 2^(bInterval-1) * 125 µs. Clamp shift to avoid UB.
+				uint8_t shift = (bint > 1) ? ((bint - 1u) > 30u ? 30u : (bint - 1u)) : 0u;
+				interval_us = 125u << shift;
 			} else {
 				// Full/low speed: bInterval in ms
 				interval_us = (uint32_t)bint * 1000u;
@@ -317,6 +318,9 @@ int main(void)
 					drop_count++;
 				}
 			}
+		}
+		for (uint8_t m = 0; m < num_out_mappings; m++) {
+			usb_host_interrupt_out_poll(out_map[m].host_slot);
 		}
 		for (uint8_t m = 0; m < num_out_mappings; m++) {
 			uint8_t *out_data = NULL;

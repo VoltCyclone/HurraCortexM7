@@ -2,12 +2,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define MAX_CONFIG_DESC_SIZE    512
-#define MAX_HID_REPORT_DESC_SIZE 512
-#define MAX_STRING_DESC_SIZE    128
+#define MAX_CONFIG_DESC_SIZE    1024
+#define MAX_HID_REPORT_DESC_SIZE 1024
+#define MAX_STRING_DESC_SIZE    256
 #define MAX_STRINGS             16
 #define MAX_INTERFACES          8
-#define MAX_BOS_DESC_SIZE       256
+#define MAX_BOS_DESC_SIZE       512
 #define MAX_LANGID_DESC_SIZE    8
 #define MS_OS_1_0_STRING_SIZE   18  // Fixed: bLength=0x12, signature "MSFT100", vendor code byte
 typedef struct {
